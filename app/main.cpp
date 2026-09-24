@@ -62,6 +62,9 @@ struct ImageDocument : EditState {
     int w = 0, h = 0, colors = 0, bits = 0;
     int pw = 0, ph = 0;
     std::vector<float> rgb;
+    std::vector<unsigned char> rendered;
+    int renderedWidth = 0;
+    int renderedHeight = 0;
     std::vector<unsigned char> thumbnail;
     GLuint thumbnailTexture = 0;
     int thumbnailWidth = 0;
@@ -277,7 +280,10 @@ static void ActivateDocument(ImageDocument* doc)
 {
     if (!doc) return;
     g_dec = doc;
-    g_rgba.clear();
+    if (doc->loaded && !doc->rendered.empty() && doc->renderedWidth > 0 && doc->renderedHeight > 0)
+        g_rgba = doc->rendered;
+    else
+        g_rgba.clear();
     g_texW = 0;
     g_texH = 0;
     ResetPreviewView();
@@ -322,7 +328,8 @@ static void RebuildPreview()
 #ifndef __EMSCRIPTEN__
     ToneMapPreview();
 #endif
-    const int w = g_dec->pw, h = g_dec->ph;
+    const int w = g_dec->renderedWidth > 0 ? g_dec->renderedWidth : g_dec->pw;
+    const int h = g_dec->renderedHeight > 0 ? g_dec->renderedHeight : g_dec->ph;
     if (w <= 0 || h <= 0 || g_rgba.empty()) return;
     const unsigned char* dst = g_rgba.data();
 
@@ -475,6 +482,9 @@ void wasm_accept_decode(int imageId, const float* preview, int w, int h, int pw,
     snprintf(doc->lens, sizeof(doc->lens), "%s", lens ? lens : "");
     snprintf(doc->lastStatus, sizeof(doc->lastStatus), "%s", status ? status : "Decoded");
     doc->rgb.assign(preview, preview + (size_t)pw * ph * 3);
+    doc->rendered.clear();
+    doc->renderedWidth = 0;
+    doc->renderedHeight = 0;
     BuildThumbnail(doc);
     doc->lastError = 0;
     InitializeHistory(doc);
@@ -490,12 +500,17 @@ void wasm_accept_preview(int imageId, const unsigned char* rgba, int w, int h,
                          int quality, int revision)
 {
     ImageDocument* doc = FindDocument(imageId);
-    if (!doc || doc != g_dec || !rgba || w <= 0 || h <= 0) return;
-    g_rgba.assign(rgba, rgba + (size_t)w * h * 4);
+    if (!doc || !rgba || w <= 0 || h <= 0) return;
+    doc->rendered.assign(rgba, rgba + (size_t)w * h * 4);
+    doc->renderedWidth = w;
+    doc->renderedHeight = h;
     doc->renderedRevision = revision;
     doc->renderedQuality = quality;
-    g_previewDirty = true;
-    g_histDirty = true;
+    if (doc == g_dec) {
+        g_rgba = doc->rendered;
+        g_previewDirty = true;
+        g_histDirty = true;
+    }
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -715,7 +730,10 @@ static void DrawHistogram()
     if (g_histDirty) ComputeHistogram();
     ImGui::Begin("Histogram");
     if (!g_dec->loaded || g_rgba.empty()) {
-        ImGui::TextDisabled("No image loaded");
+        if (g_dec->id > 0 && !g_dec->loaded)
+            ImGui::TextDisabled("Loading %s", g_dec->lastStatus);
+        else
+            ImGui::TextDisabled(g_dec->loaded ? "Preparing preview..." : "No image loaded");
         ImGui::End();
         return;
     }
@@ -736,8 +754,13 @@ static void DrawHistogram()
 static void DrawNavigator()
 {
     ImGui::Begin("Navigator");
+    if (g_dec->id > 0 && !g_dec->loaded) {
+        ImGui::TextDisabled("Loading %s", g_dec->lastStatus);
+        ImGui::End();
+        return;
+    }
     if (!g_dec->loaded || !g_tex || g_texW <= 0 || g_texH <= 0) {
-        ImGui::TextDisabled("No image loaded");
+        ImGui::TextDisabled(g_dec->loaded ? "Preparing preview..." : "No image loaded");
         ImGui::End();
         return;
     }
@@ -828,8 +851,18 @@ static void DrawHistory()
     ImGui::End();
 }
 
+static void SelectDocument(ImageDocument* doc)
+{
+    if (!doc) return;
+    ActivateDocument(doc);
+#ifdef __EMSCRIPTEN__
+    js_select_image(doc->id);
+#endif
+}
+
 static void DrawFilmstrip()
 {
+    ImGui::SetNextWindowSize(ImVec2(220.0f, 420.0f), ImGuiCond_FirstUseEver);
     ImGui::Begin("Filmstrip");
     if (g_images.empty()) {
         ImGui::TextDisabled("No images loaded");
@@ -844,16 +877,10 @@ static void DrawFilmstrip()
                                          ImVec2(128.0f, 80.0f));
         else
             clicked = ImGui::Button("No preview", ImVec2(128.0f, 80.0f));
-        if (clicked) {
-            ActivateDocument(&doc);
-#ifdef __EMSCRIPTEN__
-            js_select_image(doc.id);
-#endif
-        }
-        if (&doc == g_dec)
-            ImGui::TextColored(ImVec4(0.45f, 0.65f, 1.0f, 1.0f), "%s", doc.name);
-        else
-            ImGui::TextUnformatted(doc.name);
+        if (clicked) SelectDocument(&doc);
+        bool selected = &doc == g_dec;
+        if (ImGui::Selectable(doc.name[0] ? doc.name : "Unnamed image", selected))
+            SelectDocument(&doc);
         ImGui::TextDisabled("%s", doc.lastStatus);
         ImGui::PopID();
     }
@@ -1008,7 +1035,10 @@ static void DrawPreview()
 {
     ImGui::Begin("Preview");
     if (!(g_tex && g_texW > 0 && g_texH > 0)) {
-        ImGui::TextDisabled("No image loaded");
+        if (g_dec->id > 0 && !g_dec->loaded)
+            ImGui::TextDisabled("Loading %s", g_dec->lastStatus);
+        else
+            ImGui::TextDisabled(g_dec->loaded ? "Preparing preview..." : "No image loaded");
         ImGui::End();
         return;
     }
@@ -1191,10 +1221,7 @@ static void HandleShortcuts()
         for (int i = 0; i < (int)g_images.size(); ++i)
             if (&g_images[i] == g_dec) current = i;
         int next = (current + (forward ? 1 : -1) + (int)g_images.size()) % (int)g_images.size();
-        ActivateDocument(&g_images[next]);
-#ifdef __EMSCRIPTEN__
-        js_select_image(g_dec->id);
-#endif
+        SelectDocument(&g_images[next]);
     }
 }
 
