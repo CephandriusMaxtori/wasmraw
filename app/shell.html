@@ -13,7 +13,6 @@
         overflow: hidden;
         font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
       }
-      /* Canvas fills the window; JS keeps its backing store at devicePixelRatio */
       #canvas {
         border: 0; background: #000;
         display: block;
@@ -21,7 +20,6 @@
         left: 0; top: 0;
         width: 100vw; height: 100vh;
       }
-      /* Startup screen: centered card, shown until the first RAW is loaded */
       #splash {
         position: fixed; inset: 0;
         display: flex;
@@ -76,8 +74,6 @@
         border-radius: 4px;
         transition: width 0.3s ease;
       }
-      /* Sweep animates on the compositor (transform), so it keeps moving even
-         while the main thread is busy in a synchronous decode phase */
       #progress .fizz {
         position: absolute;
         top: 0; bottom: 0; left: 0;
@@ -115,11 +111,11 @@
         <div class="logo">RawTherapee <span>WASM</span></div>
         <div id="splashStatus">Loading runtime...</div>
         <div id="progress"><div class="fill"></div><div class="fizz"></div></div>
-        <div class="instructions">Drop a RAW file anywhere, double-click, or press Ctrl+O</div>
+        <div class="instructions">Drop RAW files anywhere, double-click, or press Ctrl+O</div>
       </div>
     </div>
-    <div id="drop">Drop RAW file</div>
-    <input type="file" id="fileInput" accept=".raw,.RAW,.cr2,.cr3,.nef,.arw,.dng,.orf,.rw2,.pef,.srw,.raf,.raw,image/*">
+    <div id="drop">Drop RAW files</div>
+    <input type="file" id="fileInput" multiple accept=".raw,.RAW,.cr2,.cr3,.nef,.arw,.dng,.orf,.rw2,.pef,.srw,.raf,.raw,image/*">
 
     <script type='text/javascript'>
       var splashEl = document.getElementById('splash');
@@ -129,19 +125,17 @@
       var inputElement = document.getElementById('fileInput');
       var dropEl = document.getElementById('drop');
       var runtimeReady = false;
-      var imageLoaded = false;
       var decodeWorker = null;
       var decodeBusy = false;
-
-      // Expose a debug handle so issues can be pinned down from the console.
-      window._wasmraw = {
-        get ready() { return runtimeReady; },
-        decode: function (bytes, name) {
-          if (!runtimeReady) return 'runtime-not-ready';
-          loadBytes(new Uint8Array(bytes), name || 'byte-buffer');
-          return 'scheduled';
-        }
-      };
+      var activeImageId = 0;
+      var activeWorkerImageId = 0;
+      var desiredImageId = 0;
+      var nextImageId = 1;
+      var nextRequestId = 1;
+      var imageCatalog = [];
+      var pendingDecodes = [];
+      var pendingPreview = null;
+      var previewTimer = null;
 
       function setStatus(text, cls) {
         statusEl.textContent = text;
@@ -157,25 +151,6 @@
         splashEl.classList.add('hide');
       }
 
-      canvasElement.addEventListener('webglcontextlost', (e) => {
-        alert('WebGL context lost. You will need to reload the page.');
-        e.preventDefault();
-      }, false);
-
-      // Size the canvas backing store to the CSS size times devicePixelRatio so
-      // the render is always sharp; C++ reads it each frame. Runs after the
-      // runtime is initialized so GLFW keeps ownership of the canvas first.
-      function fitCanvas() {
-        var dpr = window.devicePixelRatio || 1;
-        canvasElement.width = Math.round(window.innerWidth * dpr);
-        canvasElement.height = Math.round(window.innerHeight * dpr);
-      }
-      window.addEventListener('resize', function () { if (runtimeReady) fitCanvas(); });
-
-      function loadBytes(bytes, name) {
-        sendToWorker(new Uint8Array(bytes), name || 'byte-buffer');
-      }
-
       function strToPtr(s) {
         var n = (s.length + 1) * 4;
         var p = Module._malloc(n);
@@ -183,125 +158,344 @@
         return p;
       }
 
-      function downloadBytes(bytes, name, type) {
-        var blob = new Blob([bytes], { type: type });
-        var a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = name;
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
-        a.remove();
+      function findRecord(id) {
+        for (var i = 0; i < imageCatalog.length; ++i)
+          if (imageCatalog[i].id === id) return imageCatalog[i];
+        return null;
       }
 
-      // The decoder worker owns LibRaw decode + full-res export; this page
-      // just forwards the file and receives preview/export results.
-      function onWorkerMessage(e) {
-        var m = e.data || {};
-        switch (m.type) {
+      function addRecord(file, bytes, name) {
+        if (!runtimeReady || !Module._wasm_add_image) return null;
+        var id = nextImageId++;
+        var record = {
+          id: id,
+          file: file || null,
+          bytes: bytes || null,
+          name: name || (file && file.name) || 'image-' + id,
+          status: 'Queued',
+          loaded: false,
+          workerReady: false,
+          decodeQueued: false,
+          revision: 0,
+          previewRequestId: 0
+        };
+        imageCatalog.push(record);
+        var namePtr = strToPtr(record.name);
+        try {
+          Module._wasm_add_image(id, namePtr);
+        } finally {
+          Module._free(namePtr);
+        }
+        return record;
+      }
+
+      function queueDecode(record) {
+        if (!record || record.decodeQueued) return;
+        if (activeWorkerImageId === record.id && record.workerReady) return;
+        record.decodeQueued = true;
+        record.status = 'Reading';
+        if (record.bytes) {
+          pendingDecodes.push(record);
+          pumpDecodeQueue();
+          return;
+        }
+        if (!record.file) {
+          record.status = 'Missing file';
+          return;
+        }
+        var reader = new FileReader();
+        reader.onload = function (event) {
+          if (!record.decodeQueued) return;
+          record.bytes = new Uint8Array(event.target.result);
+          pendingDecodes.push(record);
+          pumpDecodeQueue();
+        };
+        reader.onerror = function () {
+          record.decodeQueued = false;
+          record.status = 'Read error';
+          setStatus('Could not read ' + record.name, 'err');
+        };
+        reader.readAsArrayBuffer(record.file);
+      }
+
+      function pumpDecodeQueue() {
+        if (decodeBusy || !decodeWorker || !pendingDecodes.length) return;
+        var index = 0;
+        if (desiredImageId) {
+          for (var i = 0; i < pendingDecodes.length; ++i) {
+            if (pendingDecodes[i].id === desiredImageId) { index = i; break; }
+          }
+        }
+        var record = pendingDecodes.splice(index, 1)[0];
+        var bytes = record.bytes;
+        record.bytes = null;
+        record.decodeQueued = false;
+        if (!bytes || !bytes.length) {
+          record.status = 'Empty file';
+          pumpDecodeQueue();
+          return;
+        }
+        decodeBusy = true;
+        activeWorkerImageId = record.id;
+        for (var j = 0; j < imageCatalog.length; ++j)
+          imageCatalog[j].workerReady = false;
+        record.status = 'Decoding';
+        record.requestId = nextRequestId++;
+        var ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        try {
+          decodeWorker.postMessage({
+            cmd: 'decode',
+            imageId: record.id,
+            requestId: record.requestId,
+            file: ab,
+            name: record.name
+          }, [ab]);
+        } catch (error) {
+          decodeBusy = false;
+          record.status = 'Worker error';
+          setStatus('postMessage failed: ' + error, 'err');
+          pumpDecodeQueue();
+        }
+      }
+
+      function selectImage(id) {
+        var record = findRecord(id);
+        if (!record) return;
+        activeImageId = id;
+        desiredImageId = id;
+        if (Module._wasm_select_image) Module._wasm_select_image(id);
+        setStatus(record.status === 'Queued' ? 'Loading ' + record.name : record.status);
+        if (activeWorkerImageId === id && record.workerReady) {
+          hideSplash();
+          return;
+        }
+        queueDecode(record);
+      }
+
+      function addFiles(files) {
+        var added = [];
+        for (var i = 0; i < files.length; ++i) {
+          var record = addRecord(files[i], null, files[i].name);
+          if (record) added.push(record);
+        }
+        if (added.length && !activeImageId) selectImage(added[0].id);
+        if (added.length > 1) setStatus(added.length + ' images added');
+      }
+
+      function loadBytes(bytes, name) {
+        var record = addRecord(null, new Uint8Array(bytes), name || 'byte-buffer');
+        if (record) selectImage(record.id);
+        return record ? record.id : 0;
+      }
+
+      function updateRecordStatus(id, status) {
+        var record = findRecord(id);
+        if (!record) return;
+        record.status = status;
+        if (Module._wasm_set_image_status) {
+          var statusPtr = strToPtr(status);
+          Module._wasm_set_image_status(id, statusPtr);
+          Module._free(statusPtr);
+        }
+        if (id === activeImageId) setStatus(status);
+      }
+
+      function onWorkerMessage(event) {
+        var message = event.data || {};
+        switch (message.type) {
           case 'ready':
             console.log('decoder: ready');
+            pumpDecodeQueue();
             break;
           case 'progress':
-            setProgress(m.pct, m.label);
+            updateRecordStatus(message.imageId, message.label || 'Working');
+            if (message.imageId === activeImageId) setProgress(message.pct || 0, message.label);
             break;
           case 'decoded': {
             decodeBusy = false;
-            var nbytes = m.pw * m.ph * 3 * 4;
+            var record = findRecord(message.imageId);
+            if (!record) break;
+            var nbytes = message.pw * message.ph * 3 * 4;
             var ptr = Module._malloc(nbytes);
-            Module.writeArrayToMemory(new Uint8Array(m.preview), ptr);
-            var makeP = strToPtr(m.make || ''), modelP = strToPtr(m.model || ''),
-                lensP = strToPtr(m.lens || ''), statusP = strToPtr(m.status || '');
+            Module.writeArrayToMemory(new Uint8Array(message.preview), ptr);
+            var makePtr = strToPtr(message.make || '');
+            var modelPtr = strToPtr(message.model || '');
+            var lensPtr = strToPtr(message.lens || '');
+            var statusPtr = strToPtr(message.status || '');
             try {
-              Module._wasm_accept_decode(ptr, m.w, m.h, m.pw, m.ph,
-                m.iso, m.shutter, m.aperture, m.focal,
-                makeP, modelP, lensP, statusP);
+              Module._wasm_accept_decode(message.imageId, ptr, message.w, message.h,
+                message.pw, message.ph, message.iso, message.shutter,
+                message.aperture, message.focal, makePtr, modelPtr, lensPtr, statusPtr);
             } finally {
-              Module._free(makeP); Module._free(modelP);
-              Module._free(lensP); Module._free(statusP);
+              Module._free(makePtr);
+              Module._free(modelPtr);
+              Module._free(lensPtr);
+              Module._free(statusPtr);
               Module._free(ptr);
             }
-            setProgress(100);
-            imageLoaded = true;
-            hideSplash();
+            record.loaded = true;
+            record.workerReady = true;
+            record.status = 'Ready';
+            record.requestId = message.requestId || record.requestId;
+            activeWorkerImageId = message.imageId;
+            if (message.imageId === activeImageId) {
+              setProgress(100, record.status);
+              hideSplash();
+            }
+            pumpDecodeQueue();
+            break;
+          }
+          case 'preview': {
+            var previewRecord = findRecord(message.imageId);
+            if (!previewRecord || previewRecord.previewRequestId !== message.requestId ||
+                previewRecord.revision !== message.revision) break;
+            var previewSize = message.w * message.h * 4;
+            var previewPtr = Module._malloc(previewSize);
+            Module.writeArrayToMemory(new Uint8Array(message.bytes), previewPtr);
+            try {
+              Module._wasm_accept_preview(message.imageId, previewPtr, message.w, message.h,
+                message.quality || 1, message.revision);
+            } finally {
+              Module._free(previewPtr);
+            }
+            if (message.imageId === activeImageId) setStatus('Ready');
+            break;
+          }
+          case 'preview-error': {
+            updateRecordStatus(message.imageId || activeImageId, message.msg || 'Preview error');
             break;
           }
           case 'exported': {
-            var sp = strToPtr(m.status || '');
-            Module._wasm_set_export_status(sp);
-            Module._free(sp);
-            downloadBytes(new Uint8Array(m.bytes),
-                          m.fmt ? 'rawtherapee-export.jpg' : 'rawtherapee-export.png',
-                          m.fmt ? 'image/jpeg' : 'image/png');
+            var exportRecord = findRecord(message.imageId);
+            var statusPtr2 = strToPtr(message.status || '');
+            Module._wasm_set_export_status(message.imageId, statusPtr2);
+            Module._free(statusPtr2);
+            var baseName = exportRecord ? exportRecord.name.replace(/\.[^.]+$/, '') : 'rawtherapee-export';
+            downloadBytes(new Uint8Array(message.bytes), baseName + (message.fmt ? '.jpg' : '.png'),
+              message.fmt ? 'image/jpeg' : 'image/png');
             break;
           }
           case 'export-error': {
-            var ep = strToPtr(m.msg || 'Export failed');
-            Module._wasm_set_export_status(ep);
-            Module._free(ep);
+            var errorPtr = strToPtr(message.msg || 'Export failed');
+            Module._wasm_set_export_status(message.imageId || activeImageId, errorPtr);
+            Module._free(errorPtr);
             break;
           }
-          case 'error':
+          case 'error': {
             decodeBusy = false;
-            setStatus(m.msg || 'Decoder error', 'err');
+            updateRecordStatus(message.imageId || 0, message.msg || 'Decoder error');
+            if (message.imageId === activeImageId) setStatus(message.msg || 'Decoder error', 'err');
+            pumpDecodeQueue();
             break;
+          }
         }
       }
 
-      function sendToWorker(bytes, name) {
-        if (!runtimeReady) { setStatus('Runtime not ready yet', 'err'); return; }
-        if (!decodeWorker) { setStatus('Decoder worker not ready', 'err'); return; }
-        if (decodeBusy) { setStatus('Already decoding a file - wait for it to finish', 'err'); return; }
-        decodeBusy = true;
-        setProgress(5, 'Reading ' + name + ' (' + (bytes.length / 1048576).toFixed(1) + ' MB) ...');
-        var ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-        try {
-          decodeWorker.postMessage({ cmd: 'decode', file: ab, name: name }, [ab]);
-        } catch (err) {
-          decodeBusy = false;
-          setStatus('postMessage failed: ' + err, 'err');
+      function downloadBytes(bytes, name, type) {
+        var blob = new Blob([bytes], { type: type });
+        var link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = name;
+        document.body.appendChild(link);
+        link.click();
+        setTimeout(function () { URL.revokeObjectURL(link.href); }, 2000);
+        link.remove();
+      }
+
+      function requestPreview(imageId, revision, exp, black, white, contrast, sat,
+                              wbR, wbG, wbB, vignette, clarity, clarityRadius,
+                              shadows, highlights, cy0, cy1, cy2, cy3, cy4, quality) {
+        var record = findRecord(imageId);
+        if (!record || !decodeWorker) return;
+        record.revision = revision;
+        pendingPreview = {
+          cmd: 'process', imageId: imageId, requestId: nextRequestId++,
+          revision: revision, exp: exp, black: black, white: white,
+          contrast: contrast, sat: sat, wbR: wbR, wbG: wbG, wbB: wbB,
+          vignette: vignette, clarity: clarity, clarityRadius: clarityRadius,
+          shadows: shadows, highlights: highlights,
+          cy0: cy0, cy1: cy1, cy2: cy2, cy3: cy3, cy4: cy4,
+          quality: quality || 1
+        };
+        record.previewRequestId = pendingPreview.requestId;
+        if (previewTimer) return;
+        previewTimer = setTimeout(function () {
+          previewTimer = null;
+          var request = pendingPreview;
+          pendingPreview = null;
+          if (request && activeWorkerImageId === request.imageId)
+            decodeWorker.postMessage(request);
+        }, 30);
+      }
+
+      function requestExport(imageId, revision, fmt, exp, black, white, contrast, sat,
+                             wbR, wbG, wbB, vignette, clarity, clarityRadius,
+                             shadows, highlights, cy0, cy1, cy2, cy3, cy4, quality) {
+        if (!decodeWorker) return;
+        if (activeWorkerImageId !== imageId) {
+          updateRecordStatus(imageId, 'Select image before exporting');
+          return;
         }
+        decodeWorker.postMessage({
+          cmd: 'export', imageId: imageId, requestId: nextRequestId++, revision: revision,
+          fmt: fmt, exp: exp, black: black, white: white, contrast: contrast, sat: sat,
+          wbR: wbR, wbG: wbG, wbB: wbB, vignette: vignette, clarity: clarity,
+          clarityRadius: clarityRadius, shadows: shadows, highlights: highlights,
+          cy0: cy0, cy1: cy1, cy2: cy2, cy3: cy3, cy4: cy4,
+          quality: Math.floor(quality)
+        });
       }
 
-      function loadFile(file) {
-        if (!file) return;
-        var reader = new FileReader();
-        reader.onload = function (e) { loadBytes(new Uint8Array(e.target.result), file.name); };
-        reader.onerror = function () { setStatus('Could not read ' + file.name, 'err'); };
-        reader.readAsArrayBuffer(file);
-      }
+      window._wasmraw = {
+        get ready() { return runtimeReady; },
+        decode: function (bytes, name) { return loadBytes(bytes, name); },
+        select: function (id) { selectImage(id); },
+        requestPreview: requestPreview,
+        requestExport: requestExport
+      };
 
-      // --- Drag & drop ---
+      canvasElement.addEventListener('webglcontextlost', function (event) {
+        alert('WebGL context lost. You will need to reload the page.');
+        event.preventDefault();
+      }, false);
+
+      function fitCanvas() {
+        var dpr = window.devicePixelRatio || 1;
+        canvasElement.width = Math.round(window.innerWidth * dpr);
+        canvasElement.height = Math.round(window.innerHeight * dpr);
+      }
+      window.addEventListener('resize', function () { if (runtimeReady) fitCanvas(); });
+
       var dragDepth = 0;
-      window.addEventListener('dragenter', function (e) {
-        e.preventDefault();
-        if (e.dataTransfer && e.dataTransfer.types &&
-            Array.prototype.indexOf.call(e.dataTransfer.types, 'Files') !== -1) {
+      window.addEventListener('dragenter', function (event) {
+        event.preventDefault();
+        if (event.dataTransfer && event.dataTransfer.types &&
+            Array.prototype.indexOf.call(event.dataTransfer.types, 'Files') !== -1) {
           dragDepth++;
           dropEl.classList.add('on');
         }
       });
-      window.addEventListener('dragover', function (e) { e.preventDefault(); });
-      window.addEventListener('dragleave', function (e) {
-        e.preventDefault();
+      window.addEventListener('dragover', function (event) { event.preventDefault(); });
+      window.addEventListener('dragleave', function (event) {
+        event.preventDefault();
         dragDepth = Math.max(0, dragDepth - 1);
         if (dragDepth === 0) dropEl.classList.remove('on');
       });
-      window.addEventListener('drop', function (e) {
-        e.preventDefault();
+      window.addEventListener('drop', function (event) {
+        event.preventDefault();
         dragDepth = 0;
         dropEl.classList.remove('on');
-        var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-        if (f) loadFile(f);
+        if (event.dataTransfer && event.dataTransfer.files) addFiles(event.dataTransfer.files);
       });
-
-      // --- File picker via double-click or keyboard ---
       window.addEventListener('dblclick', function () { inputElement.click(); });
-      window.addEventListener('keydown', function (e) {
-        if (e.key === 'o' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); inputElement.click(); }
+      window.addEventListener('keydown', function (event) {
+        if (event.key === 'o' && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          inputElement.click();
+        }
       });
       inputElement.addEventListener('change', function () {
-        if (inputElement.files && inputElement.files[0]) loadFile(inputElement.files[0]);
+        if (inputElement.files && inputElement.files.length) addFiles(inputElement.files);
         inputElement.value = '';
       });
 
@@ -309,27 +503,23 @@
         print: function () { console.log.apply(console, arguments); },
         printErr: function () { console.error.apply(console, arguments); },
         canvas: canvasElement,
-        setStatus: function (text) {
-          if (text) setStatus(text); // forward runtime load status only
-        },
-        onAbort: function (text) {
-          setStatus('Runtime aborted: ' + text, 'err');
-        },
+        setStatus: function (text) { if (text) setStatus(text); },
+        onAbort: function (text) { setStatus('Runtime aborted: ' + text, 'err'); },
         onRuntimeInitialized: function () {
           runtimeReady = true;
           fitCanvas();
           console.log('wasmraw: runtime initialized');
-          setStatus('Ready - drop a RAW file, double-click, or press Ctrl+O');
+          setStatus('Ready - drop RAW files, double-click, or press Ctrl+O');
           try {
             if (typeof Worker === 'undefined') throw new Error('Worker API unavailable');
             decodeWorker = new Worker('decoder-worker.js');
             decodeWorker.onmessage = onWorkerMessage;
-            decodeWorker.onerror = function (e) {
-              setStatus('Decoder worker error: ' + (e.message || 'unknown'), 'err');
+            decodeWorker.onerror = function (event) {
+              setStatus('Decoder worker error: ' + (event.message || 'unknown'), 'err');
             };
             console.log('decoder: worker spawned');
-          } catch (err) {
-            setStatus('Could not start decoder worker: ' + err, 'err');
+          } catch (error) {
+            setStatus('Could not start decoder worker: ' + error, 'err');
           }
         },
         totalDependencies: 0,
@@ -338,33 +528,28 @@
           if (left) setStatus('Preparing... (' + (this.totalDependencies - left) + '/' + this.totalDependencies + ')');
         }
       };
-      window.onerror = window.onunhandledrejection = function (msg, src, line, col, err) {
-        setStatus('Exception: ' + (err && err.message ? err.message : msg), 'err');
+      window.onerror = window.onunhandledrejection = function (message, source, line, column, error) {
+        setStatus('Exception: ' + (error && error.message ? error.message : message), 'err');
       };
-
-      // If the runtime never becomes ready, report exactly why.
       setTimeout(function () {
         if (runtimeReady) return;
         var moduleDefined = typeof Module !== 'undefined';
         var detail = 'wasmraw.js loaded: ' + (moduleDefined ? 'yes' : 'NO');
         if (moduleDefined) {
-          detail += '; HEAPU8: ' + (Module.HEAPU8 ? 'yes' : 'no')
-                  + '; _wasm_accept_decode: ' + (Module._wasm_accept_decode ? 'yes' : 'no');
+          detail += '; HEAPU8: ' + (Module.HEAPU8 ? 'yes' : 'no') +
+            '; _wasm_add_image: ' + (Module._wasm_add_image ? 'yes' : 'no');
         }
         console.error('wasmraw startup watchdog fired after 10s:', detail);
         setStatus('Startup never finished. ' + detail + ' - check DevTools console / Network tab.', 'err');
       }, 10000);
-
-      // Fail early, visibly, when runtime prerequisites are missing.
       (function featureCheck() {
         if (typeof WebAssembly === 'undefined') {
           setStatus('WebAssembly is not supported in this browser', 'err');
           return;
         }
         var probe = document.createElement('canvas');
-        if (!probe.getContext('webgl2')) {
+        if (!probe.getContext('webgl2'))
           setStatus('WebGL2 is not available - check hardware acceleration / GPU settings', 'err');
-        }
       })();
     </script>
     {{{ SCRIPT }}}

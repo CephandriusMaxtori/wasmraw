@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <string>
 #include <vector>
 
 #ifdef __EMSCRIPTEN__
@@ -15,49 +17,43 @@
 #include "emscripten_mainloop_stub.h"
 #endif
 
-// ---------- Live tone sliders ----------
-static float g_exposure = 0.0f;    // EV
-static int   g_black = 0;          // 0..50  -> fraction 0..0.5
-static int   g_white = 100;        // 50..100 -> fraction 0.5..1.0
-static float g_contrast = 0.0f;    // -100..100
-static float g_saturation = 100.0f;// 0..200
-static int   g_vignette = 0;       // -100..100 -> -1..1
-static float g_clarity = 0.0f;     // -100..100 -> -1..1
-static float g_clarityRadius = 2.0f;// 0.5..3 px
-static int   g_shadows = 0;        // -100..100
-static int   g_highlights = 0;     // -100..100
-static int   g_jpegQuality = 90;   // 0..100
-
-// ---------- White balance (linear channel gain applied at tone-map time) ----------
-static float g_wb[3] = { 1.0f, 1.0f, 1.0f };
-static const char* kWbPresets[] = { "Camera", "Daylight", "Cloudy", "Shade",
-                                    "Tungsten", "Fluorescent", "Flash", "Custom" };
-static const float kWbPresetValues[7][3] = {
-    { 1.00f, 1.00f, 1.00f },  // Camera
-    { 1.00f, 1.00f, 1.00f },  // Daylight
-    { 0.98f, 0.98f, 1.12f },  // Cloudy
-    { 0.92f, 1.00f, 1.20f },  // Shade
-    { 0.82f, 1.00f, 1.48f },  // Tungsten
-    { 1.00f, 1.05f, 1.12f },  // Fluorescent
-    { 1.00f, 1.00f, 1.04f },  // Flash
+struct EditState {
+    float exposure = 0.0f;
+    int black = 0;
+    int white = 100;
+    float contrast = 0.0f;
+    float saturation = 100.0f;
+    int vignette = 0;
+    float clarity = 0.0f;
+    float clarityRadius = 2.0f;
+    int shadows = 0;
+    int highlights = 0;
+    float wb[3] = { 1.0f, 1.0f, 1.0f };
+    int wbPreset = 0;
+    float curveY[5] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+    int jpegQuality = 90;
 };
-static int   g_wbPreset = 0;
-static bool  g_wbPicking = false;
 
-// ---------- Tone curve (x fixed at 0,.25,.5,.75,1; y movable in 0..1) ----------
-static float g_curveY[5] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+struct HistoryEntry {
+    char label[64] = {0};
+    EditState state;
+};
 
-// ---------- Histogram (computed from the tone-mapped preview) ----------
-static int g_histL[256], g_histR[256], g_histG[256], g_histB[256];
-static bool g_histDirty = true;
+struct Snapshot {
+    char name[64] = {0};
+    EditState state;
+};
 
-// ---------- Decoded RAW (preview-resolution linear float RGB) ----------
-struct DecodedImage {
+struct ImageDocument : EditState {
+    int id = 0;
+    int revision = 0;
+    int renderedRevision = -1;
+    char name[256] = {0};
     bool loaded = false;
     int w = 0, h = 0, colors = 0, bits = 0;
     int pw = 0, ph = 0;
-    std::vector<float> rgb;        // pw*ph*3, linear [0..1]
-    bool hasFullRes = false;       // full-res lives in the decoder worker
+    std::vector<float> rgb;
+    bool hasFullRes = false;
     int fw = 0, fh = 0;
     char make[64] = {0};
     char model[64] = {0};
@@ -65,17 +61,50 @@ struct DecodedImage {
     float iso = 0.f, shutter = 0.f, aperture = 0.f, focal = 0.f;
     int lastError = 0;
     char lastStatus[256] = "No image loaded - drop a RAW file or double-click";
+    char exportStatus[160] = "";
+    std::vector<HistoryEntry> history;
+    int historyPos = -1;
+    std::vector<Snapshot> snapshots;
 };
-static DecodedImage g_dec;
 
+static std::deque<ImageDocument> g_images;
+static ImageDocument g_empty;
+static ImageDocument* g_dec = &g_empty;
+static bool g_wbPicking = false;
+
+static ImageDocument* FindDocument(int id)
+{
+    for (ImageDocument& doc : g_images)
+        if (doc.id == id) return &doc;
+    return nullptr;
+}
+
+static void RequestPreview();
+
+static const char* kWbPresets[] = { "Camera", "Daylight", "Cloudy", "Shade",
+                                    "Tungsten", "Fluorescent", "Flash", "Custom" };
+static const float kWbPresetValues[7][3] = {
+    { 1.00f, 1.00f, 1.00f },
+    { 1.00f, 1.00f, 1.00f },
+    { 0.98f, 0.98f, 1.12f },
+    { 0.92f, 1.00f, 1.20f },
+    { 0.82f, 1.00f, 1.48f },
+    { 1.00f, 1.05f, 1.12f },
+    { 1.00f, 1.00f, 1.04f },
+};
+
+static int g_histL[256], g_histR[256], g_histG[256], g_histB[256];
+static bool g_histDirty = true;
 static GLuint g_tex = 0;
 static int g_texW = 0, g_texH = 0;
 static bool g_previewDirty = true;
-
-// ---------- Preview pan/zoom ----------
 static bool g_zoomFit = true;
-static float g_zoom = 1.0f;      // image px per CSS px when not fitting
-static ImVec2 g_pan(0.0f, 0.0f); // CSS px offset from the centered position
+static float g_zoom = 1.0f;
+static ImVec2 g_pan(0.0f, 0.0f);
+static std::vector<unsigned char> g_rgba;
+static char g_exportStatus[160] = "";
+static const int kPreviewMaxDim = 1600;
+static bool g_exportFullRes = true;
 
 static void ResetPreviewView()
 {
@@ -84,14 +113,6 @@ static void ResetPreviewView()
     g_pan = ImVec2(0.0f, 0.0f);
 }
 
-// Tone-mapped RGBA8 preview buffer (also the upload source for the GL texture)
-static std::vector<unsigned char> g_rgba;    // pw*ph*4
-static char g_exportStatus[160] = "";        // filled from the worker's result
-
-static const int kPreviewMaxDim = 1600;
-static bool g_exportFullRes = true;  // export native resolution when available
-
-// ---------- Placeholder test pattern (shown until a RAW is loaded) ----------
 static void CreatePlaceholderTexture()
 {
     const int w = 640, h = 428;
@@ -124,39 +145,109 @@ static void CreatePlaceholderTexture()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-    g_texW = w; g_texH = h;
+    g_texW = w;
+    g_texH = h;
 }
 
-// ---------- Preview rebuild: linear float RGB -> RGBA8 with tone sliders ----------
+static void InitializeHistory(ImageDocument* doc)
+{
+    if (!doc || !doc->history.empty()) return;
+    HistoryEntry entry;
+    snprintf(entry.label, sizeof(entry.label), "Open");
+    entry.state = *doc;
+    doc->history.push_back(entry);
+    doc->historyPos = 0;
+}
+
+static void RecordHistory(ImageDocument* doc, const char* label)
+{
+    if (!doc) return;
+    InitializeHistory(doc);
+    if (doc->historyPos + 1 < (int)doc->history.size())
+        doc->history.resize(doc->historyPos + 1);
+    HistoryEntry entry;
+    snprintf(entry.label, sizeof(entry.label), "%s", label ? label : "Edit");
+    entry.state = *doc;
+    doc->history.push_back(entry);
+    doc->historyPos = (int)doc->history.size() - 1;
+}
+
+static void ApplyEditState(const EditState& state)
+{
+    if (!g_dec) return;
+    static_cast<EditState&>(*g_dec) = state;
+    g_dec->revision++;
+    g_previewDirty = true;
+    g_histDirty = true;
+    RequestPreview();
+}
+
+static void UndoEdit()
+{
+    if (!g_dec || g_dec->historyPos <= 0) return;
+    g_dec->historyPos--;
+    ApplyEditState(g_dec->history[g_dec->historyPos].state);
+}
+
+static void RedoEdit()
+{
+    if (!g_dec || g_dec->historyPos + 1 >= (int)g_dec->history.size()) return;
+    g_dec->historyPos++;
+    ApplyEditState(g_dec->history[g_dec->historyPos].state);
+}
+
+static void AddSnapshot()
+{
+    if (!g_dec) return;
+    Snapshot snapshot;
+    snprintf(snapshot.name, sizeof(snapshot.name), "Snapshot %d", (int)g_dec->snapshots.size() + 1);
+    snapshot.state = *g_dec;
+    g_dec->snapshots.push_back(snapshot);
+}
+
+static void ActivateDocument(ImageDocument* doc)
+{
+    if (!doc) return;
+    g_dec = doc;
+    g_rgba.clear();
+    g_texW = 0;
+    g_texH = 0;
+    ResetPreviewView();
+    g_previewDirty = true;
+    g_histDirty = true;
+}
+
 static tone::Params CurrentToneParams()
 {
     tone::Params p;
-    p.exposure = g_exposure;
-    p.black = (float)g_black / 100.0f;
-    p.white = (float)g_white / 100.0f;
-    p.contrast = g_contrast / 100.0f;
-    p.saturation = g_saturation / 100.0f;
-    p.vignette = (float)g_vignette / 100.0f;
-    p.clarity = g_clarity / 100.0f;
-    p.clarityRadius = g_clarityRadius;
-    p.shadows = (float)g_shadows / 100.0f;
-    p.highlights = (float)g_highlights / 100.0f;
-    p.wbR = g_wb[0]; p.wbG = g_wb[1]; p.wbB = g_wb[2];
-    for (int i = 0; i < 5; ++i) p.curveY[i] = g_curveY[i];
+    p.exposure = g_dec->exposure;
+    p.black = (float)g_dec->black / 100.0f;
+    p.white = (float)g_dec->white / 100.0f;
+    p.contrast = g_dec->contrast / 100.0f;
+    p.saturation = g_dec->saturation / 100.0f;
+    p.vignette = (float)g_dec->vignette / 100.0f;
+    p.clarity = g_dec->clarity / 100.0f;
+    p.clarityRadius = g_dec->clarityRadius;
+    p.shadows = (float)g_dec->shadows / 100.0f;
+    p.highlights = (float)g_dec->highlights / 100.0f;
+    p.wbR = g_dec->wb[0]; p.wbG = g_dec->wb[1]; p.wbB = g_dec->wb[2];
+    for (int i = 0; i < 5; ++i) p.curveY[i] = g_dec->curveY[i];
     return p;
 }
 
 static void ToneMapPreview()
 {
-    if (!g_dec.loaded || g_dec.pw <= 0 || g_dec.ph <= 0) return;
-    tone::ToneMapToBuffer(g_dec.rgb, g_dec.pw, g_dec.ph, CurrentToneParams(), g_rgba);
+    if (!g_dec->loaded || g_dec->pw <= 0 || g_dec->ph <= 0) return;
+    tone::ToneMapToBuffer(g_dec->rgb, g_dec->pw, g_dec->ph, CurrentToneParams(), g_rgba);
 }
 
 static void RebuildPreview()
 {
+#ifndef __EMSCRIPTEN__
     ToneMapPreview();
-    const int w = g_dec.pw, h = g_dec.ph;
-    if (w <= 0 || h <= 0) return;
+#endif
+    const int w = g_dec->pw, h = g_dec->ph;
+    if (w <= 0 || h <= 0 || g_rgba.empty()) return;
     const unsigned char* dst = g_rgba.data();
 
     if (!g_tex) {
@@ -178,6 +269,45 @@ static void RebuildPreview()
     g_histDirty = true;
 }
 
+#ifdef __EMSCRIPTEN__
+EM_JS(void, js_request_preview, (int imageId, int revision,
+                                  double exp, double black, double white,
+                                  double contrast, double sat,
+                                  double wbR, double wbG, double wbB, double vignette,
+                                  double clarity, double clarityRadius,
+                                  double shadows, double highlights,
+                                  double cy0, double cy1, double cy2, double cy3, double cy4,
+                                  int quality), {
+    if (!window._wasmraw || !window._wasmraw.requestPreview) return;
+    window._wasmraw.requestPreview(imageId, revision, exp, black, white, contrast, sat,
+        wbR, wbG, wbB, vignette, clarity, clarityRadius, shadows, highlights,
+        cy0, cy1, cy2, cy3, cy4, quality);
+});
+#endif
+
+static void RequestPreview()
+{
+    if (!g_dec || !g_dec->loaded) return;
+#ifdef __EMSCRIPTEN__
+    js_request_preview(g_dec->id, g_dec->revision,
+                       g_dec->exposure,
+                       (double)g_dec->black / 100.0,
+                       (double)g_dec->white / 100.0,
+                       (double)g_dec->contrast / 100.0,
+                       (double)g_dec->saturation / 100.0,
+                       g_dec->wb[0], g_dec->wb[1], g_dec->wb[2],
+                       (double)g_dec->vignette / 100.0,
+                       (double)g_dec->clarity / 100.0,
+                       g_dec->clarityRadius,
+                       (double)g_dec->shadows / 100.0,
+                       (double)g_dec->highlights / 100.0,
+                       g_dec->curveY[0], g_dec->curveY[1], g_dec->curveY[2], g_dec->curveY[3], g_dec->curveY[4],
+                       1);
+#else
+    g_previewDirty = true;
+#endif
+}
+
 // ---------- WASM API for the JS shell ----------
 // Decode and full-resolution export run in the decoder worker. This module
 // receives the preview floats + metadata the worker produced, and forwards
@@ -185,82 +315,146 @@ static void RebuildPreview()
 
 extern "C" {
 
-// Preview floats are pw*ph*3 float32 in module memory, plus metadata.
 EMSCRIPTEN_KEEPALIVE
-void wasm_accept_decode(const float* preview, int w, int h, int pw, int ph,
+void wasm_add_image(int imageId, const char* name)
+{
+    if (imageId <= 0) return;
+    ImageDocument* doc = FindDocument(imageId);
+    if (doc) {
+        if (name && name[0]) snprintf(doc->name, sizeof(doc->name), "%s", name);
+        return;
+    }
+    g_images.emplace_back();
+    doc = &g_images.back();
+    doc->id = imageId;
+    if (name) snprintf(doc->name, sizeof(doc->name), "%s", name);
+    snprintf(doc->lastStatus, sizeof(doc->lastStatus), "Queued");
+    InitializeHistory(doc);
+    if (g_dec == &g_empty) ActivateDocument(doc);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void wasm_select_image(int imageId)
+{
+    ImageDocument* doc = FindDocument(imageId);
+    if (doc) {
+        ActivateDocument(doc);
+        if (doc->loaded) RequestPreview();
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_image_status(int imageId, const char* text)
+{
+    ImageDocument* doc = FindDocument(imageId);
+    if (doc) snprintf(doc->lastStatus, sizeof(doc->lastStatus), "%s", text ? text : "");
+}
+
+EMSCRIPTEN_KEEPALIVE
+void wasm_accept_decode(int imageId, const float* preview, int w, int h, int pw, int ph,
                         double iso, double shutter, double aperture, double focal,
                         const char* make, const char* model, const char* lens,
                         const char* status)
 {
-    g_dec.loaded = true;
-    g_dec.w = w; g_dec.h = h;
-    g_dec.pw = pw; g_dec.ph = ph;
-    g_dec.colors = 3;
-    g_dec.bits = 16;
-    g_dec.hasFullRes = false; // full-res copy lives in the worker
-    g_dec.fw = w; g_dec.fh = h;
-    g_dec.iso = (float)iso;
-    g_dec.shutter = (float)shutter;
-    g_dec.aperture = (float)aperture;
-    g_dec.focal = (float)focal;
-    snprintf(g_dec.make, sizeof(g_dec.make), "%s", make ? make : "");
-    snprintf(g_dec.model, sizeof(g_dec.model), "%s", model ? model : "");
-    snprintf(g_dec.lens, sizeof(g_dec.lens), "%s", lens ? lens : "");
-    snprintf(g_dec.lastStatus, sizeof(g_dec.lastStatus), "%s", status ? status : "Decoded");
-    g_dec.rgb.assign(preview, preview + (size_t)pw * ph * 3);
-    g_dec.lastError = 0;
-    ResetPreviewView();
-    g_previewDirty = true;
-    g_histDirty = true;
+    ImageDocument* doc = FindDocument(imageId);
+    if (!doc) {
+        wasm_add_image(imageId, "");
+        doc = FindDocument(imageId);
+    }
+    if (!doc || !preview) return;
+    bool activate = (g_dec == &g_empty || g_dec->id == imageId);
+    if (activate) {
+        g_dec = doc;
+        g_rgba.clear();
+        g_texW = 0;
+        g_texH = 0;
+        ResetPreviewView();
+    }
+    doc->loaded = true;
+    doc->w = w; doc->h = h;
+    doc->pw = pw; doc->ph = ph;
+    doc->colors = 3;
+    doc->bits = 16;
+    doc->hasFullRes = false;
+    doc->fw = w; doc->fh = h;
+    doc->iso = (float)iso;
+    doc->shutter = (float)shutter;
+    doc->aperture = (float)aperture;
+    doc->focal = (float)focal;
+    snprintf(doc->make, sizeof(doc->make), "%s", make ? make : "");
+    snprintf(doc->model, sizeof(doc->model), "%s", model ? model : "");
+    snprintf(doc->lens, sizeof(doc->lens), "%s", lens ? lens : "");
+    snprintf(doc->lastStatus, sizeof(doc->lastStatus), "%s", status ? status : "Decoded");
+    doc->rgb.assign(preview, preview + (size_t)pw * ph * 3);
+    doc->lastError = 0;
+    InitializeHistory(doc);
+    if (activate) {
+        g_previewDirty = true;
+        g_histDirty = true;
+        RequestPreview();
+    }
 }
 
 EMSCRIPTEN_KEEPALIVE
-void wasm_set_export_status(const char* text)
+void wasm_accept_preview(int imageId, const unsigned char* rgba, int w, int h,
+                         int quality, int revision)
+{
+    ImageDocument* doc = FindDocument(imageId);
+    if (!doc || doc != g_dec || !rgba || w <= 0 || h <= 0) return;
+    g_rgba.assign(rgba, rgba + (size_t)w * h * 4);
+    doc->renderedRevision = revision;
+    g_previewDirty = true;
+    g_histDirty = true;
+    (void)quality;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_export_status(int imageId, const char* text)
 {
     snprintf(g_exportStatus, sizeof(g_exportStatus), "%s", text ? text : "");
+    ImageDocument* doc = FindDocument(imageId);
+    if (doc) snprintf(doc->exportStatus, sizeof(doc->exportStatus), "%s", text ? text : "");
 }
 
 #ifdef __EMSCRIPTEN__
-EM_JS(void, js_request_export, (int fmt, double exp, double black, double white,
+EM_JS(void, js_request_export, (int imageId, int revision, int fmt, double exp, double black, double white,
                                 double contrast, double sat,
                                 double wbR, double wbG, double wbB, double vignette,
                                 double clarity, double clarityRadius,
                                 double shadows, double highlights,
                                 double cy0, double cy1, double cy2, double cy3, double cy4,
                                 double quality), {
-    if (typeof worker === 'undefined' || !worker) return;
-    worker.postMessage({
-        cmd: 'export', fmt: fmt,
-        exp: exp, black: black, white: white,
-        contrast: contrast, sat: sat,
-        wbR: wbR, wbG: wbG, wbB: wbB, vignette: vignette,
-        clarity: clarity, clarityRadius: clarityRadius,
-        shadows: shadows, highlights: highlights,
-        cy0: cy0, cy1: cy1, cy2: cy2, cy3: cy3, cy4: cy4,
-        quality: Math.floor(quality)
-    });
+    if (!window._wasmraw || !window._wasmraw.requestExport) return;
+    window._wasmraw.requestExport(imageId, revision, fmt, exp, black, white,
+        contrast, sat, wbR, wbG, wbB, vignette, clarity, clarityRadius,
+        shadows, highlights, cy0, cy1, cy2, cy3, cy4, Math.floor(quality));
+});
+
+EM_JS(void, js_select_image, (int imageId), {
+    if (window._wasmraw && window._wasmraw.select) window._wasmraw.select(imageId);
 });
 #endif
 
 static void RequestExport(int format)
 {
-    if (!g_dec.loaded) return;
+    if (!g_dec->loaded) return;
     snprintf(g_exportStatus, sizeof(g_exportStatus), "Exporting...");
+    snprintf(g_dec->exportStatus, sizeof(g_dec->exportStatus), "Exporting...");
 #ifdef __EMSCRIPTEN__
-    js_request_export(format,
-                      g_exposure,
-                      (double)g_black / 100.0,
-                      (double)g_white / 100.0,
-                      (double)g_contrast / 100.0,
-                      (double)g_saturation / 100.0,
-                      g_wb[0], g_wb[1], g_wb[2],
-                      (double)g_vignette / 100.0,
-                      (double)g_clarity / 100.0,
-                      (double)g_clarityRadius,
-                      (double)g_shadows / 100.0,
-                      (double)g_highlights / 100.0,
-                      g_curveY[0], g_curveY[1], g_curveY[2], g_curveY[3], g_curveY[4],
-                      g_jpegQuality);
+    js_request_export(g_dec->id, g_dec->revision, format,
+                      g_dec->exposure,
+                      (double)g_dec->black / 100.0,
+                      (double)g_dec->white / 100.0,
+                      (double)g_dec->contrast / 100.0,
+                      (double)g_dec->saturation / 100.0,
+                      g_dec->wb[0], g_dec->wb[1], g_dec->wb[2],
+                      (double)g_dec->vignette / 100.0,
+                      (double)g_dec->clarity / 100.0,
+                      (double)g_dec->clarityRadius,
+                      (double)g_dec->shadows / 100.0,
+                      (double)g_dec->highlights / 100.0,
+                      g_dec->curveY[0], g_dec->curveY[1], g_dec->curveY[2], g_dec->curveY[3], g_dec->curveY[4],
+                      g_dec->jpegQuality);
 #else
     (void)format;
 #endif
@@ -401,13 +595,13 @@ static void AddHistPoly(ImDrawList* dl, float x0, float y0, float x1, float y1,
 
 static void ComputeHistogram()
 {
-    if (!g_dec.loaded || g_rgba.empty()) return;
+    if (!g_dec->loaded || g_rgba.empty()) return;
     memset(g_histL, 0, sizeof(g_histL));
     memset(g_histR, 0, sizeof(g_histR));
     memset(g_histG, 0, sizeof(g_histG));
     memset(g_histB, 0, sizeof(g_histB));
     const unsigned char* s = g_rgba.data();
-    size_t n = (size_t)g_dec.pw * g_dec.ph;
+    size_t n = (size_t)g_dec->pw * g_dec->ph;
     for (size_t i = 0; i < n; ++i) {
         unsigned char r = s[i * 4], gg = s[i * 4 + 1], b = s[i * 4 + 2];
         int lum = ((int)r * 77 + (int)gg * 151 + (int)b * 28) >> 8;
@@ -420,7 +614,7 @@ static void DrawHistogram()
 {
     if (g_histDirty) ComputeHistogram();
     ImGui::Begin("Histogram");
-    if (!g_dec.loaded || g_rgba.empty()) {
+    if (!g_dec->loaded || g_rgba.empty()) {
         ImGui::TextDisabled("No image loaded");
         ImGui::End();
         return;
@@ -439,81 +633,138 @@ static void DrawHistogram()
     ImGui::End();
 }
 
+static void DrawHistory()
+{
+    ImGui::Begin("History");
+    if (!g_dec || g_dec->id == 0) {
+        ImGui::TextDisabled("No image loaded");
+        ImGui::End();
+        return;
+    }
+    if (ImGui::Button("Undo")) UndoEdit();
+    ImGui::SameLine();
+    if (ImGui::Button("Redo")) RedoEdit();
+    ImGui::SameLine();
+    if (ImGui::Button("Snapshot")) AddSnapshot();
+    ImGui::Separator();
+    ImGui::Text("Edits");
+    for (int i = 0; i < (int)g_dec->history.size(); ++i) {
+        bool selected = i == g_dec->historyPos;
+        if (ImGui::Selectable(g_dec->history[i].label, selected) && !selected) {
+            g_dec->historyPos = i;
+            ApplyEditState(g_dec->history[i].state);
+        }
+    }
+    if (!g_dec->snapshots.empty()) {
+        ImGui::Separator();
+        ImGui::Text("Snapshots");
+        for (const Snapshot& snapshot : g_dec->snapshots) {
+            if (ImGui::Selectable(snapshot.name, false))
+                ApplyEditState(snapshot.state);
+        }
+    }
+    ImGui::End();
+}
+
+static void DrawFilmstrip()
+{
+    ImGui::Begin("Filmstrip");
+    if (g_images.empty()) {
+        ImGui::TextDisabled("No images loaded");
+        ImGui::End();
+        return;
+    }
+    for (ImageDocument& doc : g_images) {
+        ImGui::PushID(doc.id);
+        bool selected = &doc == g_dec;
+        if (ImGui::Selectable(doc.name[0] ? doc.name : "Unnamed image", selected)) {
+            ActivateDocument(&doc);
+#ifdef __EMSCRIPTEN__
+            js_select_image(doc.id);
+#endif
+        }
+        ImGui::PopID();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", doc.lastStatus);
+    }
+    ImGui::End();
+}
+
 static void DrawToolbox()
 {
     ImGui::Begin("Toolbox");
     ImGui::TextUnformatted("Exposure");
-    ImGui::SliderFloat("##exposure", &g_exposure, -5.0f, 5.0f, "%.2f EV");
+    ImGui::SliderFloat("##exposure", &g_dec->exposure, -5.0f, 5.0f, "%.2f EV");
     ImGui::TextUnformatted("Black / White points");
-    ImGui::SliderInt("Black", &g_black, 0, 50);
-    ImGui::SliderInt("White", &g_white, 50, 100);
+    ImGui::SliderInt("Black", &g_dec->black, 0, 50);
+    ImGui::SliderInt("White", &g_dec->white, 50, 100);
     ImGui::TextUnformatted("Tone");
-    ImGui::SliderFloat("Contrast", &g_contrast, -100.0f, 100.0f);
-    ImGui::SliderFloat("Saturation", &g_saturation, 0.0f, 200.0f);
-    ImGui::SliderInt("Vignetting", &g_vignette, -100, 100, "%d");
+    ImGui::SliderFloat("Contrast", &g_dec->contrast, -100.0f, 100.0f);
+    ImGui::SliderFloat("Saturation", &g_dec->saturation, 0.0f, 200.0f);
+    ImGui::SliderInt("Vignetting", &g_dec->vignette, -100, 100, "%d");
     ImGui::TextDisabled("+ lightens corners, - darkens");
-    ImGui::SliderInt("Shadows", &g_shadows, -100, 100, "%d");
-    ImGui::SliderInt("Highlights", &g_highlights, -100, 100, "%d");
-    ImGui::SliderFloat("Clarity", &g_clarity, -100.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Radius", &g_clarityRadius, 0.5f, 3.0f, "%.1f px");
+    ImGui::SliderInt("Shadows", &g_dec->shadows, -100, 100, "%d");
+    ImGui::SliderInt("Highlights", &g_dec->highlights, -100, 100, "%d");
+    ImGui::SliderFloat("Clarity", &g_dec->clarity, -100.0f, 100.0f, "%.0f");
+    ImGui::SliderFloat("Radius", &g_dec->clarityRadius, 0.5f, 3.0f, "%.1f px");
 
     ImGui::Separator();
     ImGui::TextUnformatted("White balance");
-    if (ImGui::BeginCombo("##wbpreset", kWbPresets[g_wbPreset])) {
+    if (ImGui::BeginCombo("##wbpreset", kWbPresets[g_dec->wbPreset])) {
         for (int i = 0; i < 8; ++i) {
-            if (ImGui::Selectable(kWbPresets[i], g_wbPreset == i)) {
+            if (ImGui::Selectable(kWbPresets[i], g_dec->wbPreset == i)) {
                 if (i < 7) {
-                    g_wb[0] = kWbPresetValues[i][0];
-                    g_wb[1] = kWbPresetValues[i][1];
-                    g_wb[2] = kWbPresetValues[i][2];
+                    g_dec->wb[0] = kWbPresetValues[i][0];
+                    g_dec->wb[1] = kWbPresetValues[i][1];
+                    g_dec->wb[2] = kWbPresetValues[i][2];
                 }
-                g_wbPreset = i;
+                g_dec->wbPreset = i;
                 g_previewDirty = true;
             }
         }
         ImGui::EndCombo();
     }
-    if (ImGui::DragFloat3("Gains", g_wb, 0.005f, 0.20f, 3.00f, "%.2f")) {
-        g_wbPreset = 7;
+    if (ImGui::DragFloat3("Gains", g_dec->wb, 0.005f, 0.20f, 3.00f, "%.2f")) {
+        g_dec->wbPreset = 7;
         g_previewDirty = true;
     }
     ImGui::Checkbox("Pick from preview (click image)", &g_wbPicking);
-    if (!g_dec.loaded) ImGui::TextDisabled("Load a RAW first");
+    if (!g_dec->loaded) ImGui::TextDisabled("Load a RAW first");
 
     ImGui::Separator();
     ImGui::TextUnformatted("Tone curve");
     if (ImGui::SmallButton("Reset curve")) {
-        for (int i = 0; i < 5; ++i) g_curveY[i] = 0.25f * (float)i;
+        for (int i = 0; i < 5; ++i) g_dec->curveY[i] = 0.25f * (float)i;
         g_previewDirty = true;
     }
-    if (CurveEditor("##tonecurve", g_curveY)) g_previewDirty = true;
+    if (CurveEditor("##tonecurve", g_dec->curveY)) g_previewDirty = true;
     ImGui::Separator();
     if (ImGui::Button("Reset tone")) {
-        g_exposure = 0.0f; g_black = 0; g_white = 100;
-        g_contrast = 0.0f; g_saturation = 100.0f; g_vignette = 0;
-        g_clarity = 0.0f; g_clarityRadius = 2.0f;
-        g_shadows = 0; g_highlights = 0;
-        g_wb[0] = g_wb[1] = g_wb[2] = 1.0f; g_wbPreset = 0;
-        for (int i = 0; i < 5; ++i) g_curveY[i] = 0.25f * (float)i;
+        g_dec->exposure = 0.0f; g_dec->black = 0; g_dec->white = 100;
+        g_dec->contrast = 0.0f; g_dec->saturation = 100.0f; g_dec->vignette = 0;
+        g_dec->clarity = 0.0f; g_dec->clarityRadius = 2.0f;
+        g_dec->shadows = 0; g_dec->highlights = 0;
+        g_dec->wb[0] = g_dec->wb[1] = g_dec->wb[2] = 1.0f; g_dec->wbPreset = 0;
+        for (int i = 0; i < 5; ++i) g_dec->curveY[i] = 0.25f * (float)i;
         g_previewDirty = true;
     }
     ImGui::TextDisabled("Live CPU point ops on decoded preview");
 
-    bool hasImage = g_dec.loaded && g_dec.pw > 0;
+    bool hasImage = g_dec->loaded && g_dec->pw > 0;
     ImGui::Separator();
     ImGui::TextUnformatted("Export");
     if (!hasImage) ImGui::BeginDisabled();
-    ImGui::SliderInt("JPEG quality", &g_jpegQuality, 50, 100, "%d");
-    if (g_dec.hasFullRes) {
+    ImGui::SliderInt("JPEG quality", &g_dec->jpegQuality, 50, 100, "%d");
+    if (g_dec->hasFullRes) {
         ImGui::Checkbox("Full resolution", &g_exportFullRes);
         if (g_exportFullRes)
             ImGui::TextDisabled("Native %dx%d -> tone-mapped copy",
-                                g_dec.fw, g_dec.fh);
+                                g_dec->fw, g_dec->fh);
     }
     if (ImGui::Button("Export PNG")) RequestExport(0);
     ImGui::SameLine();
     if (ImGui::Button("Export JPEG")) RequestExport(1);
-    if (g_exportStatus[0]) ImGui::TextWrapped("%s", g_exportStatus);
+    if (g_dec->exportStatus[0]) ImGui::TextWrapped("%s", g_dec->exportStatus);
     if (!hasImage) { ImGui::EndDisabled(); ImGui::TextDisabled("Load a RAW first"); }
     ImGui::End();
 }
@@ -588,19 +839,19 @@ static void DrawPreview()
     float tly = cyp - ih * 0.5f + (g_zoomFit ? 0.0f : g_pan.y);
 
     // White-balance eyedropper: click a neutral point to sample it.
-    if (g_wbPicking && hovered && ImGui::IsMouseClicked(0) && g_dec.loaded && g_dec.pw > 0) {
+    if (g_wbPicking && hovered && ImGui::IsMouseClicked(0) && g_dec->loaded && g_dec->pw > 0) {
         float u = (mouse.x - tlx) / iw, v = (mouse.y - tly) / ih;
         if (u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f) {
-            int px = (int)(u * (float)(g_dec.pw - 1));
-            int py = (int)(v * (float)(g_dec.ph - 1));
+            int px = (int)(u * (float)(g_dec->pw - 1));
+            int py = (int)(v * (float)(g_dec->ph - 1));
             if (px < 0) px = 0; if (py < 0) py = 0;
             float sum[3] = { 0, 0, 0 };
             int ns = 0;
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
                     int sx = px + dx, sy = py + dy;
-                    if (sx < 0 || sx >= g_dec.pw || sy < 0 || sy >= g_dec.ph) continue;
-                    const float* s = &g_dec.rgb[((size_t)sy * g_dec.pw + sx) * 3];
+                    if (sx < 0 || sx >= g_dec->pw || sy < 0 || sy >= g_dec->ph) continue;
+                    const float* s = &g_dec->rgb[((size_t)sy * g_dec->pw + sx) * 3];
                     sum[0] += s[0]; sum[1] += s[1]; sum[2] += s[2];
                     ++ns;
                 }
@@ -615,8 +866,8 @@ static void DrawPreview()
                     if (gain[c] < mn) mn = gain[c];
                 }
                 for (int c = 0; c < 3; ++c) gain[c] /= mn;
-                for (int c = 0; c < 3; ++c) g_wb[c] = gain[c];
-                g_wbPreset = 7;
+                for (int c = 0; c < 3; ++c) g_dec->wb[c] = gain[c];
+                g_dec->wbPreset = 7;
                 g_wbPicking = false;
                 g_previewDirty = true;
             }
@@ -639,34 +890,75 @@ static void DrawPreview()
 static void DrawStatus()
 {
     ImGui::Begin("Status");
-    ImGui::TextWrapped("%s", g_dec.lastStatus);
-    if (g_dec.loaded) {
+    ImGui::TextWrapped("%s", g_dec->lastStatus);
+    if (g_dec->loaded) {
         ImGui::Separator();
-        ImGui::Text("Camera: %s %s", g_dec.make, g_dec.model);
+        ImGui::Text("Camera: %s %s", g_dec->make, g_dec->model);
         char cam[128] = "";
-        if (g_dec.iso > 0.f)
-            snprintf(cam + strlen(cam), sizeof(cam) - strlen(cam), "ISO %.0f  ", g_dec.iso);
-        if (g_dec.shutter > 0.f) {
-            if (g_dec.shutter >= 1.f)
-                snprintf(cam + strlen(cam), sizeof(cam) - strlen(cam), "1/%.0fs  ", g_dec.shutter);
+        if (g_dec->iso > 0.f)
+            snprintf(cam + strlen(cam), sizeof(cam) - strlen(cam), "ISO %.0f  ", g_dec->iso);
+        if (g_dec->shutter > 0.f) {
+            if (g_dec->shutter >= 1.f)
+                snprintf(cam + strlen(cam), sizeof(cam) - strlen(cam), "1/%.0fs  ", g_dec->shutter);
             else
-                snprintf(cam + strlen(cam), sizeof(cam) - strlen(cam), "%.1fs  ", g_dec.shutter);
+                snprintf(cam + strlen(cam), sizeof(cam) - strlen(cam), "%.1fs  ", g_dec->shutter);
         }
-        if (g_dec.aperture > 0.f)
-            snprintf(cam + strlen(cam), sizeof(cam) - strlen(cam), "f/%.1f  ", g_dec.aperture);
-        if (g_dec.focal > 0.f)
-            snprintf(cam + strlen(cam), sizeof(cam) - strlen(cam), "%.0fmm", g_dec.focal);
+        if (g_dec->aperture > 0.f)
+            snprintf(cam + strlen(cam), sizeof(cam) - strlen(cam), "f/%.1f  ", g_dec->aperture);
+        if (g_dec->focal > 0.f)
+            snprintf(cam + strlen(cam), sizeof(cam) - strlen(cam), "%.0fmm", g_dec->focal);
         if (cam[0]) ImGui::Text("%s", cam);
-        if (g_dec.lens[0]) ImGui::TextDisabled("Lens: %s", g_dec.lens);
+        if (g_dec->lens[0]) ImGui::TextDisabled("Lens: %s", g_dec->lens);
         ImGui::Separator();
         ImGui::Text("Source: %d x %d, %d-bit, %d channels",
-                    g_dec.w, g_dec.h, g_dec.bits, g_dec.colors);
-        ImGui::Text("Preview: %d x %d (max %d)", g_dec.pw, g_dec.ph, kPreviewMaxDim);
+                    g_dec->w, g_dec->h, g_dec->bits, g_dec->colors);
+        ImGui::Text("Preview: %d x %d (max %d)", g_dec->pw, g_dec->ph, kPreviewMaxDim);
         ImGui::Text("EV %+.2f  Black %d  White %d  Contrast %.0f  Sat %.0f",
-                    g_exposure, g_black, g_white, g_contrast, g_saturation);
+                    g_dec->exposure, g_dec->black, g_dec->white, g_dec->contrast, g_dec->saturation);
     }
     ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
     ImGui::End();
+}
+
+static void HandleShortcuts()
+{
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantTextInput) return;
+
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z)) {
+        if (io.KeyShift) RedoEdit();
+        else UndoEdit();
+    }
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y)) RedoEdit();
+    if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_N)) AddSnapshot();
+
+    if (ImGui::IsKeyPressed(ImGuiKey_0)) ResetPreviewView();
+    if (ImGui::IsKeyPressed(ImGuiKey_1)) {
+        g_zoomFit = false;
+        g_zoom = 1.0f;
+        g_pan = ImVec2(0.0f, 0.0f);
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Equal)) {
+        g_zoomFit = false;
+        g_zoom = std::min(16.0f, g_zoom * 1.25f);
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Minus)) {
+        g_zoomFit = false;
+        g_zoom = std::max(0.05f, g_zoom / 1.25f);
+    }
+
+    if (!g_images.empty() &&
+        (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_RightArrow))) {
+        bool forward = ImGui::IsKeyPressed(ImGuiKey_RightArrow);
+        int current = 0;
+        for (int i = 0; i < (int)g_images.size(); ++i)
+            if (&g_images[i] == g_dec) current = i;
+        int next = (current + (forward ? 1 : -1) + (int)g_images.size()) % (int)g_images.size();
+        ActivateDocument(&g_images[next]);
+#ifdef __EMSCRIPTEN__
+        js_select_image(g_dec->id);
+#endif
+    }
 }
 
 static void RenderFrame(GLFWwindow* window)
@@ -678,8 +970,9 @@ static void RenderFrame(GLFWwindow* window)
     ApplyDisplayScale(); // layout in CSS px, framebuffer at devicePixelRatio
 #endif
     ImGui::NewFrame();
+    HandleShortcuts();
 
-    if (g_previewDirty && g_dec.loaded) RebuildPreview();
+    if (g_previewDirty && g_dec->loaded) RebuildPreview();
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -696,6 +989,8 @@ static void RenderFrame(GLFWwindow* window)
     ImGui::End();
 
     DrawPreview();
+    DrawFilmstrip();
+    DrawHistory();
     DrawToolbox();
     DrawHistogram();
     DrawStatus();
@@ -710,7 +1005,11 @@ static void RenderFrame(GLFWwindow* window)
     glfwSwapBuffers(window);
 }
 
-static void MarkToneDirty() { g_previewDirty = true; }
+static void MarkToneDirty()
+{
+    g_previewDirty = true;
+    if (g_dec && g_dec->id > 0) g_dec->revision++;
+}
 
 #if !defined(WASMRAW_SMOKE_TEST)
 int main()
@@ -755,14 +1054,17 @@ int main()
     CreatePlaceholderTexture();
 
     // Track slider edits to avoid pointless per-frame rebuilds
-    float lastExposure = g_exposure;
-    int lastBlack = g_black, lastWhite = g_white;
-    float lastContrast = g_contrast, lastSat = g_saturation;
-    int lastVig = g_vignette, lastShadows = g_shadows, lastHighlights = g_highlights;
-    float lastClarity = g_clarity, lastClarityRadius = g_clarityRadius;
-    float lastWb0 = g_wb[0], lastWb1 = g_wb[1], lastWb2 = g_wb[2];
-    float lastCurve0 = g_curveY[0], lastCurve1 = g_curveY[1], lastCurve2 = g_curveY[2];
-    float lastCurve3 = g_curveY[3], lastCurve4 = g_curveY[4];
+    float lastExposure = g_dec->exposure;
+    int lastBlack = g_dec->black, lastWhite = g_dec->white;
+    float lastContrast = g_dec->contrast, lastSat = g_dec->saturation;
+    int lastVig = g_dec->vignette, lastShadows = g_dec->shadows, lastHighlights = g_dec->highlights;
+    float lastClarity = g_dec->clarity, lastClarityRadius = g_dec->clarityRadius;
+    float lastWb0 = g_dec->wb[0], lastWb1 = g_dec->wb[1], lastWb2 = g_dec->wb[2];
+    float lastCurve0 = g_dec->curveY[0], lastCurve1 = g_dec->curveY[1], lastCurve2 = g_dec->curveY[2];
+    float lastCurve3 = g_dec->curveY[3], lastCurve4 = g_dec->curveY[4];
+    bool historyPending = false;
+    float historyDelay = 0.0f;
+    int lastDocumentId = g_dec->id;
 
 #ifdef __EMSCRIPTEN__
     EMSCRIPTEN_MAINLOOP_BEGIN
@@ -770,22 +1072,54 @@ int main()
     while (!glfwWindowShouldClose(window))
 #endif
     {
-        if (g_exposure != lastExposure || g_black != lastBlack || g_white != lastWhite ||
-            g_contrast != lastContrast || g_saturation != lastSat ||
-            g_vignette != lastVig || g_shadows != lastShadows || g_highlights != lastHighlights ||
-            g_clarity != lastClarity || g_clarityRadius != lastClarityRadius ||
-            g_wb[0] != lastWb0 || g_wb[1] != lastWb1 || g_wb[2] != lastWb2 ||
-            g_curveY[0] != lastCurve0 || g_curveY[1] != lastCurve1 ||
-            g_curveY[2] != lastCurve2 || g_curveY[3] != lastCurve3 ||
-            g_curveY[4] != lastCurve4) {
+        if (g_dec->id != lastDocumentId) {
+            lastDocumentId = g_dec->id;
+            lastExposure = g_dec->exposure;
+            lastBlack = g_dec->black;
+            lastWhite = g_dec->white;
+            lastContrast = g_dec->contrast;
+            lastSat = g_dec->saturation;
+            lastVig = g_dec->vignette;
+            lastShadows = g_dec->shadows;
+            lastHighlights = g_dec->highlights;
+            lastClarity = g_dec->clarity;
+            lastClarityRadius = g_dec->clarityRadius;
+            lastWb0 = g_dec->wb[0];
+            lastWb1 = g_dec->wb[1];
+            lastWb2 = g_dec->wb[2];
+            lastCurve0 = g_dec->curveY[0];
+            lastCurve1 = g_dec->curveY[1];
+            lastCurve2 = g_dec->curveY[2];
+            lastCurve3 = g_dec->curveY[3];
+            lastCurve4 = g_dec->curveY[4];
+            historyPending = false;
+        }
+        if (g_dec->exposure != lastExposure || g_dec->black != lastBlack || g_dec->white != lastWhite ||
+            g_dec->contrast != lastContrast || g_dec->saturation != lastSat ||
+            g_dec->vignette != lastVig || g_dec->shadows != lastShadows || g_dec->highlights != lastHighlights ||
+            g_dec->clarity != lastClarity || g_dec->clarityRadius != lastClarityRadius ||
+            g_dec->wb[0] != lastWb0 || g_dec->wb[1] != lastWb1 || g_dec->wb[2] != lastWb2 ||
+            g_dec->curveY[0] != lastCurve0 || g_dec->curveY[1] != lastCurve1 ||
+            g_dec->curveY[2] != lastCurve2 || g_dec->curveY[3] != lastCurve3 ||
+            g_dec->curveY[4] != lastCurve4) {
             MarkToneDirty();
-            lastExposure = g_exposure; lastBlack = g_black; lastWhite = g_white;
-            lastContrast = g_contrast; lastSat = g_saturation; lastVig = g_vignette;
-            lastShadows = g_shadows; lastHighlights = g_highlights;
-            lastClarity = g_clarity; lastClarityRadius = g_clarityRadius;
-            lastWb0 = g_wb[0]; lastWb1 = g_wb[1]; lastWb2 = g_wb[2];
-            lastCurve0 = g_curveY[0]; lastCurve1 = g_curveY[1]; lastCurve2 = g_curveY[2];
-            lastCurve3 = g_curveY[3]; lastCurve4 = g_curveY[4];
+            RequestPreview();
+            historyPending = g_dec->id > 0;
+            historyDelay = 0.25f;
+            lastExposure = g_dec->exposure; lastBlack = g_dec->black; lastWhite = g_dec->white;
+            lastContrast = g_dec->contrast; lastSat = g_dec->saturation; lastVig = g_dec->vignette;
+            lastShadows = g_dec->shadows; lastHighlights = g_dec->highlights;
+            lastClarity = g_dec->clarity; lastClarityRadius = g_dec->clarityRadius;
+            lastWb0 = g_dec->wb[0]; lastWb1 = g_dec->wb[1]; lastWb2 = g_dec->wb[2];
+            lastCurve0 = g_dec->curveY[0]; lastCurve1 = g_dec->curveY[1]; lastCurve2 = g_dec->curveY[2];
+            lastCurve3 = g_dec->curveY[3];             lastCurve4 = g_dec->curveY[4];
+        }
+        if (historyPending) {
+            historyDelay -= io.DeltaTime;
+            if (historyDelay <= 0.0f) {
+                RecordHistory(g_dec, "Adjustments");
+                historyPending = false;
+            }
         }
 #ifdef __EMSCRIPTEN__
         if (io.WantSaveIniSettings) { io.WantSaveIniSettings = false; SaveLayoutToStorage(); }

@@ -29,6 +29,7 @@ struct Decoded {
 static Decoded g_dec;
 
 static std::vector<unsigned char> g_exportBuf;
+static std::vector<unsigned char> g_renderedPreview;
 static char g_exportStatus[160] = "";
 
 // Decode session (kept alive across phase calls so the browser can show
@@ -282,6 +283,57 @@ const char* dec_meta_lens() { return g_dec.lens; }
 
 EMSCRIPTEN_KEEPALIVE
 const char* dec_meta_status() { return g_dec.status; }
+
+EMSCRIPTEN_KEEPALIVE
+int dec_render_preview(double exposure, double black, double white, double contrast,
+                       double sat, double wbR, double wbG, double wbB, double vignette,
+                       double clarity, double clarityRadius, double shadows, double highlights,
+                       double cy0, double cy1, double cy2, double cy3, double cy4,
+                       int quality)
+{
+    g_renderedPreview.clear();
+    if (!g_dec.loaded || g_dec.previewRgb.empty()) return 0;
+
+    tone::Params p;
+    p.exposure = (float)exposure;
+    p.black = (float)black;
+    p.white = (float)white;
+    p.contrast = (float)contrast;
+    p.saturation = (float)sat;
+    p.wbR = (float)wbR;
+    p.wbG = (float)wbG;
+    p.wbB = (float)wbB;
+    p.vignette = (float)vignette;
+    p.clarity = quality == 0 ? 0.f : (float)clarity;
+    p.clarityRadius = (float)clarityRadius;
+    p.shadows = (float)shadows;
+    p.highlights = (float)highlights;
+    p.curveY[0] = (float)cy0;
+    p.curveY[1] = (float)cy1;
+    p.curveY[2] = (float)cy2;
+    p.curveY[3] = (float)cy3;
+    p.curveY[4] = (float)cy4;
+    tone::ToneMapToBuffer(g_dec.previewRgb, g_dec.pw, g_dec.ph, p, g_renderedPreview);
+    return 1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const unsigned char* dec_rendered_preview_ptr()
+{
+    return g_renderedPreview.empty() ? nullptr : g_renderedPreview.data();
+}
+
+EMSCRIPTEN_KEEPALIVE
+size_t dec_rendered_preview_size()
+{
+    return g_renderedPreview.size();
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dec_rendered_preview_width() { return g_dec.pw; }
+
+EMSCRIPTEN_KEEPALIVE
+int dec_rendered_preview_height() { return g_dec.ph; }
 
 // Tone-maps the native-resolution copy with the given params and encodes the
 // result (format 0 = PNG, 1 = JPEG). Runs entirely on the worker thread.
