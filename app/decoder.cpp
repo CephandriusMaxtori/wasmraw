@@ -356,10 +356,14 @@ int dec_export_write(double exposure, double black, double white, double contras
                      double sharpenRadius, double denoise, double vibrance,
                      double ca, double distortion, double shadows, double highlights,
                      double cy0, double cy1, double cy2, double cy3, double cy4,
-                     int format, int quality)
+                     int fullRes, int format, int quality)
 {
     g_exportBuf.clear();
-    if (!g_dec.loaded || g_dec.fullRgb.empty()) {
+    const bool useFullResolution = fullRes != 0;
+    const std::vector<float>& source = useFullResolution ? g_dec.fullRgb : g_dec.previewRgb;
+    const int outputWidth = useFullResolution ? g_dec.w : g_dec.pw;
+    const int outputHeight = useFullResolution ? g_dec.h : g_dec.ph;
+    if (!g_dec.loaded || source.empty() || outputWidth <= 0 || outputHeight <= 0) {
         snprintf(g_exportStatus, sizeof(g_exportStatus), "Nothing loaded to export");
         return 0;
     }
@@ -393,7 +397,7 @@ int dec_export_write(double exposure, double black, double white, double contras
     p.curveY[4] = (float)cy4;
 
     std::vector<unsigned char> rgba8;
-    tone::ToneMapToBuffer(g_dec.fullRgb, g_dec.w, g_dec.h, p, rgba8);
+    tone::ToneMapToBuffer(source, outputWidth, outputHeight, p, rgba8);
 
     struct Ctx { std::vector<unsigned char>* v; };
     auto writer = [](void* context, void* data, int size) {
@@ -405,13 +409,13 @@ int dec_export_write(double exposure, double black, double white, double contras
 
     int ok = 0;
     if (format == 0)
-        ok = stbi_write_png_to_func(writer, &ctx, g_dec.w, g_dec.h, 4, rgba8.data(), 0);
+        ok = stbi_write_png_to_func(writer, &ctx, outputWidth, outputHeight, 4, rgba8.data(), 0);
     else
-        ok = stbi_write_jpg_to_func(writer, &ctx, g_dec.w, g_dec.h, 4, rgba8.data(),
+        ok = stbi_write_jpg_to_func(writer, &ctx, outputWidth, outputHeight, 4, rgba8.data(),
                                     quality > 0 ? quality : 90);
     if (ok)
         snprintf(g_exportStatus, sizeof(g_exportStatus), "%s exported: %dx%d, %.1f KB",
-                 format == 0 ? "PNG" : "JPEG", g_dec.w, g_dec.h,
+                 format == 0 ? "PNG" : "JPEG", outputWidth, outputHeight,
                  g_exportBuf.size() / 1024.0);
     else
         snprintf(g_exportStatus, sizeof(g_exportStatus), "Export encode failed");

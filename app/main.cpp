@@ -56,6 +56,7 @@ struct ImageDocument : EditState {
     int id = 0;
     int revision = 0;
     int renderedRevision = -1;
+    int renderedQuality = 0;
     char name[256] = {0};
     bool loaded = false;
     int w = 0, h = 0, colors = 0, bits = 0;
@@ -66,6 +67,7 @@ struct ImageDocument : EditState {
     int thumbnailWidth = 0;
     int thumbnailHeight = 0;
     bool hasFullRes = false;
+    bool exportFullRes = true;
     int fw = 0, fh = 0;
     char make[64] = {0};
     char model[64] = {0};
@@ -135,7 +137,6 @@ static ImVec2 g_previewContentSize(0.0f, 0.0f);
 static std::vector<unsigned char> g_rgba;
 static char g_exportStatus[160] = "";
 static const int kPreviewMaxDim = 1600;
-static bool g_exportFullRes = true;
 
 static void ResetPreviewView()
 {
@@ -459,7 +460,7 @@ void wasm_accept_decode(int imageId, const float* preview, int w, int h, int pw,
     doc->pw = pw; doc->ph = ph;
     doc->colors = 3;
     doc->bits = 16;
-    doc->hasFullRes = false;
+    doc->hasFullRes = true;
     doc->fw = w; doc->fh = h;
     doc->iso = (float)iso;
     doc->shutter = (float)shutter;
@@ -488,9 +489,9 @@ void wasm_accept_preview(int imageId, const unsigned char* rgba, int w, int h,
     if (!doc || doc != g_dec || !rgba || w <= 0 || h <= 0) return;
     g_rgba.assign(rgba, rgba + (size_t)w * h * 4);
     doc->renderedRevision = revision;
+    doc->renderedQuality = quality;
     g_previewDirty = true;
     g_histDirty = true;
-    (void)quality;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -502,7 +503,7 @@ void wasm_set_export_status(int imageId, const char* text)
 }
 
 #ifdef __EMSCRIPTEN__
-EM_JS(void, js_request_export, (int imageId, int revision, int fmt, double exp, double black, double white,
+EM_JS(void, js_request_export, (int imageId, int revision, int fmt, int fullRes, double exp, double black, double white,
                                 double contrast, double sat, double temperature, double tint,
                                 double wbR, double wbG, double wbB, double vignette,
                                 double clarity, double clarityRadius, double sharpening,
@@ -511,7 +512,7 @@ EM_JS(void, js_request_export, (int imageId, int revision, int fmt, double exp, 
                                 double cy0, double cy1, double cy2, double cy3, double cy4,
                                 double quality), {
     if (!window._wasmraw || !window._wasmraw.requestExport) return;
-    window._wasmraw.requestExport(imageId, revision, fmt, exp, black, white,
+    window._wasmraw.requestExport(imageId, revision, fmt, fullRes, exp, black, white,
         contrast, sat, temperature, tint, wbR, wbG, wbB, vignette, clarity, clarityRadius,
         sharpening, sharpenRadius, denoise, vibrance, ca, distortion, shadows, highlights,
         cy0, cy1, cy2, cy3, cy4, Math.floor(quality));
@@ -528,7 +529,7 @@ static void RequestExport(int format)
     snprintf(g_exportStatus, sizeof(g_exportStatus), "Exporting...");
     snprintf(g_dec->exportStatus, sizeof(g_dec->exportStatus), "Exporting...");
 #ifdef __EMSCRIPTEN__
-    js_request_export(g_dec->id, g_dec->revision, format,
+    js_request_export(g_dec->id, g_dec->revision, format, g_dec->exportFullRes,
                       g_dec->exposure,
                       (double)g_dec->black / 100.0,
                       (double)g_dec->white / 100.0,
@@ -939,10 +940,13 @@ static void DrawToolbox()
     if (!hasImage) ImGui::BeginDisabled();
     ImGui::SliderInt("JPEG quality", &g_dec->jpegQuality, 50, 100, "%d");
     if (g_dec->hasFullRes) {
-        ImGui::Checkbox("Full resolution", &g_exportFullRes);
-        if (g_exportFullRes)
+        ImGui::Checkbox("Full resolution", &g_dec->exportFullRes);
+        if (g_dec->exportFullRes)
             ImGui::TextDisabled("Native %dx%d -> tone-mapped copy",
                                 g_dec->fw, g_dec->fh);
+        else
+            ImGui::TextDisabled("Preview %dx%d -> tone-mapped copy",
+                                g_dec->pw, g_dec->ph);
     }
     if (ImGui::Button("Export PNG")) RequestExport(0);
     ImGui::SameLine();
@@ -1097,6 +1101,7 @@ static void DrawStatus()
         ImGui::Text("Source: %d x %d, %d-bit, %d channels",
                     g_dec->w, g_dec->h, g_dec->bits, g_dec->colors);
         ImGui::Text("Preview: %d x %d (max %d)", g_dec->pw, g_dec->ph, kPreviewMaxDim);
+        ImGui::Text("Render quality: %s", g_dec->renderedQuality == 1 ? "final" : "draft");
         ImGui::Text("EV %+.2f  Black %d  White %d  Contrast %.0f  Sat %.0f",
                     g_dec->exposure, g_dec->black, g_dec->white, g_dec->contrast, g_dec->saturation);
     }

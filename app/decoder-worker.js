@@ -144,7 +144,7 @@ function handleExport(request) {
     request.sharpenRadius, request.denoise, request.vibrance, request.ca,
     request.distortion, request.shadows, request.highlights,
     request.cy0, request.cy1, request.cy2, request.cy3, request.cy4,
-    request.fmt, request.quality);
+    request.fullRes ? 1 : 0, request.fmt, request.quality);
   var size = Module._dec_export_size();
   if (!result || !size) {
     fields.type = 'export-error';

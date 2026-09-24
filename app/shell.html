@@ -308,14 +308,17 @@
             console.log('decoder: ready');
             pumpDecodeQueue();
             break;
-          case 'progress':
+          case 'progress': {
+            var progressRecord = findRecord(message.imageId);
+            if (!progressRecord || progressRecord.requestId !== message.requestId) break;
             updateRecordStatus(message.imageId, message.label || 'Working');
             if (message.imageId === activeImageId) setProgress(message.pct || 0, message.label);
             break;
+          }
           case 'decoded': {
-            decodeBusy = false;
             var record = findRecord(message.imageId);
-            if (!record) break;
+            if (!record || record.requestId !== message.requestId) break;
+            decodeBusy = false;
             var nbytes = message.pw * message.ph * 3 * 4;
             var ptr = Module._malloc(nbytes);
             Module.writeArrayToMemory(new Uint8Array(message.preview), ptr);
@@ -391,6 +394,8 @@
             break;
           }
           case 'error': {
+            var errorRecord = findRecord(message.imageId || 0);
+            if (errorRecord && errorRecord.requestId !== message.requestId) break;
             decodeBusy = false;
             updateRecordStatus(message.imageId || 0, message.msg || 'Decoder error');
             if (message.imageId === activeImageId) setStatus(message.msg || 'Decoder error', 'err');
@@ -443,7 +448,7 @@
         }, 30);
       }
 
-      function requestExport(imageId, revision, fmt, exp, black, white, contrast, sat,
+      function requestExport(imageId, revision, fmt, fullRes, exp, black, white, contrast, sat,
                              temperature, tint, wbR, wbG, wbB, vignette,
                              clarity, clarityRadius, sharpening, sharpenRadius,
                              denoise, vibrance, ca, distortion, shadows, highlights,
@@ -455,7 +460,7 @@
         }
         decodeWorker.postMessage({
           cmd: 'export', imageId: imageId, requestId: nextRequestId++, revision: revision,
-          fmt: fmt, exp: exp, black: black, white: white, contrast: contrast, sat: sat,
+          fmt: fmt, fullRes: fullRes, exp: exp, black: black, white: white, contrast: contrast, sat: sat,
           temperature: temperature, tint: tint, wbR: wbR, wbG: wbG, wbB: wbB,
           vignette: vignette, clarity: clarity, clarityRadius: clarityRadius,
           sharpening: sharpening, sharpenRadius: sharpenRadius, denoise: denoise,

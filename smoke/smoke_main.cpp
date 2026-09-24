@@ -28,7 +28,7 @@ extern "C" int dec_export_write(double exposure, double black, double white,
                                 double sharpenRadius, double denoise, double vibrance,
                                 double ca, double distortion, double shadows, double highlights,
                                 double cy0, double cy1, double cy2, double cy3, double cy4,
-                                int format, int quality);
+                                int fullRes, int format, int quality);
 extern "C" size_t dec_export_size();
 extern "C" const unsigned char* dec_export_data();
 
@@ -91,7 +91,7 @@ int main(int argc, char** argv)
                                      0.0, 0.0, 1.0, 1.0, 1.0, 0.25,
                                      0.3, 2.0, 0.2, 1.0, 0.1, 0.0,
                                      0.0, 0.0, 0.2, 0.1,
-                                     0.0, 0.25, 0.5, 0.75, 1.0, 0, 0);
+                                          0.0, 0.25, 0.5, 0.75, 1.0, 1, 0, 0);
         size_t pngSz = dec_export_size();
         const unsigned char* png = dec_export_data();
         bool pngOk = okPng && pngSz > 0 && png && memcmp(png, kPngMagic, 8) == 0;
@@ -102,7 +102,7 @@ int main(int argc, char** argv)
                                      0.0, 0.0, 1.0, 1.0, 1.0, -0.25,
                                      0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
                                      0.0, 0.0, -0.2, -0.1,
-                                     0.0, 0.25, 0.5, 0.75, 1.0, 1, 90);
+                                          0.0, 0.25, 0.5, 0.75, 1.0, 1, 1, 90);
         size_t jpgSz = dec_export_size();
         const unsigned char* jpg = dec_export_data();
         bool jpgOk = okJpg && jpgSz > 0 && jpg && jpg[0] == 0xFF && jpg[1] == 0xD8;
