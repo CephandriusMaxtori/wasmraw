@@ -87,6 +87,25 @@ int main(int argc, char** argv)
         printf("PREVIEW-RENDER ok=%d size=%u\n", renderedOk ? 1 : 0, (unsigned)renderedSize);
         if (!renderedOk) r = 1;
 
+        unsigned char* baseline = (unsigned char*)malloc(renderedSize);
+        const unsigned char* renderedPtr = dec_rendered_preview_ptr();
+        if (baseline && renderedPtr) memcpy(baseline, renderedPtr, renderedSize);
+        int exposureRendered = dec_render_preview(5.0, 0.0, 1.0, 0.0, 1.0,
+                                                  0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
+                                                  0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
+                                                  0.0, 0.0, 0.0, 0.0,
+                                                  0.0, 0.25, 0.5, 0.75, 1.0, 1);
+        const unsigned char* exposurePtr = dec_rendered_preview_ptr();
+        bool exposureChanged = false;
+        if (baseline && exposurePtr) {
+            for (size_t i = 0; i < renderedSize; ++i) {
+                if (baseline[i] != exposurePtr[i]) { exposureChanged = true; break; }
+            }
+        }
+        free(baseline);
+        printf("PREVIEW-EXPOSURE ok=%d\n", (exposureRendered && exposureChanged) ? 1 : 0);
+        if (!exposureRendered || !exposureChanged) r = 1;
+
         int okPng = dec_export_write(0.0, 0.0, 1.0, 0.0, 1.0,
                                      0.0, 0.0, 1.0, 1.0, 1.0, 0.25,
                                      0.3, 2.0, 0.2, 1.0, 0.1, 0.0,

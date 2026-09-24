@@ -90,6 +90,7 @@ static ImageDocument* g_dec = &g_empty;
 static bool g_wbPicking = false;
 static bool g_skipHistory = false;
 static bool g_controlHovered = false;
+static bool g_controlChanged = false;
 static int g_requestedImageId = 0;
 
 static ImageDocument* FindDocument(int id)
@@ -118,6 +119,7 @@ static bool EditStateEqual(const EditState& a, const EditState& b)
 
 static void RequestPreview();
 static void ToneMapPreview();
+static void MarkToneDirty();
 
 static const char* kWbPresets[] = { "Camera", "Daylight", "Cloudy", "Shade",
                                     "Tungsten", "Fluorescent", "Flash", "Custom" };
@@ -327,6 +329,13 @@ static void ToneMapPreview()
 {
     if (!g_dec->loaded || g_dec->pw <= 0 || g_dec->ph <= 0) return;
     tone::ToneMapToBuffer(g_dec->rgb, g_dec->pw, g_dec->ph, CurrentToneParams(), g_rgba);
+    if (!g_rgba.empty()) {
+        g_dec->rendered = g_rgba;
+        g_dec->renderedWidth = g_dec->pw;
+        g_dec->renderedHeight = g_dec->ph;
+        g_dec->renderedQuality = 0;
+        g_dec->renderedRevision = g_dec->revision;
+    }
 }
 
 static void RebuildPreview()
@@ -920,6 +929,10 @@ static bool SliderFloatWithReset(const char* label, float* value, float minValue
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
         g_controlHovered = true;
+    if (changed) {
+        MarkToneDirty();
+        g_controlChanged = true;
+    }
     ImGui::PopID();
     return changed;
 }
@@ -945,6 +958,10 @@ static bool SliderIntWithReset(const char* label, int* value, int minValue, int 
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
         g_controlHovered = true;
+    if (changed) {
+        MarkToneDirty();
+        g_controlChanged = true;
+    }
     ImGui::PopID();
     return changed;
 }
@@ -1293,6 +1310,12 @@ static void MarkToneDirty()
 {
     g_previewDirty = true;
     if (g_dec && g_dec->id > 0) g_dec->revision++;
+#ifdef __EMSCRIPTEN__
+    if (g_dec && g_dec->loaded) {
+        ToneMapPreview();
+        g_histDirty = true;
+    }
+#endif
 }
 
 #if !defined(WASMRAW_SMOKE_TEST)
@@ -1353,8 +1376,10 @@ int main()
             lastEditState = static_cast<const EditState&>(*g_dec);
             historyPending = false;
         }
-        if (!EditStateEqual(static_cast<const EditState&>(*g_dec), lastEditState)) {
-            MarkToneDirty();
+        bool changedInControls = g_controlChanged;
+        g_controlChanged = false;
+        if (changedInControls || !EditStateEqual(static_cast<const EditState&>(*g_dec), lastEditState)) {
+            if (!changedInControls) MarkToneDirty();
             RequestPreview();
             if (g_skipHistory) {
                 g_skipHistory = false;
