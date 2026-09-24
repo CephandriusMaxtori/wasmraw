@@ -86,6 +86,7 @@ static ImageDocument g_empty;
 static ImageDocument* g_dec = &g_empty;
 static bool g_wbPicking = false;
 static bool g_skipHistory = false;
+static bool g_controlHovered = false;
 
 static ImageDocument* FindDocument(int id)
 {
@@ -434,6 +435,9 @@ void wasm_set_image_status(int imageId, const char* text)
     ImageDocument* doc = FindDocument(imageId);
     if (doc) snprintf(doc->lastStatus, sizeof(doc->lastStatus), "%s", text ? text : "");
 }
+
+EMSCRIPTEN_KEEPALIVE
+int wasm_control_hovered() { return g_controlHovered ? 1 : 0; }
 
 EMSCRIPTEN_KEEPALIVE
 void wasm_accept_decode(int imageId, const float* preview, int w, int h, int pw, int ph,
@@ -856,37 +860,81 @@ static void DrawFilmstrip()
     ImGui::End();
 }
 
+static bool SliderFloatWithReset(const char* label, float* value, float minValue, float maxValue,
+                                 const char* format, float resetValue)
+{
+    ImGui::PushID(label);
+    const float resetWidth = ImGui::CalcTextSize("Reset").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x - resetWidth - spacing));
+    bool changed = ImGui::SliderFloat(label, value, minValue, maxValue, format);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) || ImGui::IsItemActive())
+        g_controlHovered = true;
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Reset")) {
+        *value = resetValue;
+        changed = true;
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
+        g_controlHovered = true;
+    ImGui::PopID();
+    return changed;
+}
+
+static bool SliderIntWithReset(const char* label, int* value, int minValue, int maxValue,
+                               const char* format, int resetValue)
+{
+    ImGui::PushID(label);
+    const float resetWidth = ImGui::CalcTextSize("Reset").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x - resetWidth - spacing));
+    bool changed = ImGui::SliderInt(label, value, minValue, maxValue, format);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) || ImGui::IsItemActive())
+        g_controlHovered = true;
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Reset")) {
+        *value = resetValue;
+        changed = true;
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
+        g_controlHovered = true;
+    ImGui::PopID();
+    return changed;
+}
+
 static void DrawToolbox()
 {
     ImGui::Begin("Toolbox");
+    g_controlHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+                                             ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     ImGui::TextUnformatted("Exposure");
-    ImGui::SliderFloat("##exposure", &g_dec->exposure, -5.0f, 5.0f, "%.2f EV");
+    SliderFloatWithReset("Exposure", &g_dec->exposure, -5.0f, 5.0f, "%.2f EV", 0.0f);
     ImGui::TextUnformatted("Black / White points");
-    ImGui::SliderInt("Black", &g_dec->black, 0, 50);
-    ImGui::SliderInt("White", &g_dec->white, 50, 100);
+    SliderIntWithReset("Black", &g_dec->black, 0, 50, "%d", 0);
+    SliderIntWithReset("White", &g_dec->white, 50, 100, "%d", 100);
     ImGui::TextUnformatted("Tone");
-    ImGui::SliderFloat("Contrast", &g_dec->contrast, -100.0f, 100.0f);
-    ImGui::SliderFloat("Saturation", &g_dec->saturation, 0.0f, 200.0f);
-    ImGui::SliderInt("Vignetting", &g_dec->vignette, -100, 100, "%d");
+    SliderFloatWithReset("Contrast", &g_dec->contrast, -100.0f, 100.0f, "%.0f", 0.0f);
+    SliderFloatWithReset("Saturation", &g_dec->saturation, 0.0f, 200.0f, "%.0f", 100.0f);
+    SliderIntWithReset("Vignetting", &g_dec->vignette, -100, 100, "%d", 0);
     ImGui::TextDisabled("+ lightens corners, - darkens");
-    ImGui::SliderInt("Shadows", &g_dec->shadows, -100, 100, "%d");
-    ImGui::SliderInt("Highlights", &g_dec->highlights, -100, 100, "%d");
-    ImGui::SliderFloat("Clarity", &g_dec->clarity, -100.0f, 100.0f, "%.0f");
-    ImGui::SliderFloat("Radius", &g_dec->clarityRadius, 0.5f, 3.0f, "%.1f px");
+    SliderIntWithReset("Shadows", &g_dec->shadows, -100, 100, "%d", 0);
+    SliderIntWithReset("Highlights", &g_dec->highlights, -100, 100, "%d", 0);
+    SliderFloatWithReset("Clarity", &g_dec->clarity, -100.0f, 100.0f, "%.0f", 0.0f);
+    SliderFloatWithReset("Clarity radius", &g_dec->clarityRadius, 0.5f, 3.0f, "%.1f px", 2.0f);
 
     if (ImGui::CollapsingHeader("Color")) {
-        ImGui::SliderInt("Temperature", &g_dec->temperature, -100, 100, "%d");
-        ImGui::SliderInt("Tint", &g_dec->tint, -100, 100, "%d");
-        ImGui::SliderInt("Vibrance", &g_dec->vibrance, -100, 100, "%d");
+        SliderIntWithReset("Temperature", &g_dec->temperature, -100, 100, "%d", 0);
+        SliderIntWithReset("Tint", &g_dec->tint, -100, 100, "%d", 0);
+        SliderIntWithReset("Vibrance", &g_dec->vibrance, -100, 100, "%d", 0);
     }
     if (ImGui::CollapsingHeader("Detail")) {
-        ImGui::SliderInt("Sharpening", &g_dec->sharpening, -100, 100, "%d");
-        ImGui::SliderFloat("Sharpening radius", &g_dec->sharpenRadius, 0.5f, 3.0f, "%.1f px");
-        ImGui::SliderInt("Noise reduction", &g_dec->denoise, 0, 100, "%d");
+        SliderIntWithReset("Sharpening", &g_dec->sharpening, -100, 100, "%d", 0);
+        SliderFloatWithReset("Sharpening radius", &g_dec->sharpenRadius, 0.5f, 3.0f, "%.1f px", 1.0f);
+        SliderIntWithReset("Noise reduction", &g_dec->denoise, 0, 100, "%d", 0);
     }
     if (ImGui::CollapsingHeader("Lens corrections")) {
-        ImGui::SliderInt("Chromatic aberration", &g_dec->ca, -100, 100, "%d");
-        ImGui::SliderInt("Distortion", &g_dec->distortion, -100, 100, "%d");
+        SliderIntWithReset("Chromatic aberration", &g_dec->ca, -100, 100, "%d", 0);
+        SliderIntWithReset("Distortion", &g_dec->distortion, -100, 100, "%d", 0);
     }
 
     ImGui::Separator();
@@ -938,7 +986,7 @@ static void DrawToolbox()
     ImGui::Separator();
     ImGui::TextUnformatted("Export");
     if (!hasImage) ImGui::BeginDisabled();
-    ImGui::SliderInt("JPEG quality", &g_dec->jpegQuality, 50, 100, "%d");
+    SliderIntWithReset("JPEG quality", &g_dec->jpegQuality, 50, 100, "%d", 90);
     if (g_dec->hasFullRes) {
         ImGui::Checkbox("Full resolution", &g_dec->exportFullRes);
         if (g_dec->exportFullRes)

@@ -512,7 +512,14 @@
         dropEl.classList.remove('on');
         if (event.dataTransfer && event.dataTransfer.files) addFiles(event.dataTransfer.files);
       });
-      window.addEventListener('dblclick', function () { inputElement.click(); });
+      canvasElement.addEventListener('dblclick', function (event) {
+        if (Module._wasm_control_hovered && Module._wasm_control_hovered()) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        inputElement.click();
+      });
       window.addEventListener('keydown', function (event) {
         if (event.key === 'o' && (event.ctrlKey || event.metaKey)) {
           event.preventDefault();

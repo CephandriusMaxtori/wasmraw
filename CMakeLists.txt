@@ -50,7 +50,7 @@ if(EMSCRIPTEN)
         "SHELL:-sALLOW_MEMORY_GROWTH=1"
         "SHELL:-sNO_EXIT_RUNTIME=1"
         "SHELL:-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','writeArrayToMemory','stringToUTF8']"
-        "SHELL:-sEXPORTED_FUNCTIONS=['_main','_malloc','_free','_wasm_add_image','_wasm_select_image','_wasm_set_image_status','_wasm_accept_decode','_wasm_accept_preview','_wasm_set_export_status']"
+        "SHELL:-sEXPORTED_FUNCTIONS=['_main','_malloc','_free','_wasm_add_image','_wasm_select_image','_wasm_set_image_status','_wasm_control_hovered','_wasm_accept_decode','_wasm_accept_preview','_wasm_set_export_status']"
         "SHELL:--shell-file ${CMAKE_CURRENT_SOURCE_DIR}/app/shell.html"
         "SHELL:-O2"
     )
