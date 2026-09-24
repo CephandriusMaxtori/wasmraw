@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="data:,">
+    <title>RawTherapee WASM</title>
+    <style>
+      html, body {
+        margin: 0; height: 100%;
+        background: #141416;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      /* Canvas fills the window; JS keeps its backing store at devicePixelRatio */
+      #canvas {
+        border: 0; background: #000;
+        display: block;
+        position: fixed;
+        left: 0; top: 0;
+        width: 100vw; height: 100vh;
+      }
+      /* Startup screen: centered card, shown until the first RAW is loaded */
+      #splash {
+        position: fixed; inset: 0;
+        display: flex;
+        align-items: center; justify-content: center;
+        background: radial-gradient(ellipse at center, rgba(24,24,28,0.92), rgba(10,10,12,0.98));
+        z-index: 40;
+        pointer-events: none;
+        transition: opacity 0.4s ease;
+      }
+      #splash.hide { opacity: 0; }
+      #splash .card {
+        text-align: center;
+        padding: 26px 40px;
+        border: 1px solid #2c2c31;
+        border-radius: 10px;
+        background: rgba(16,16,19,0.9);
+        box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+      }
+      #splash .logo {
+        font-size: 26px;
+        font-weight: 600;
+        letter-spacing: 1px;
+        color: #e8eaf0;
+        margin-bottom: 10px;
+      }
+      #splash .logo span { color: #6f8fd8; }
+      #splashStatus {
+        font-size: 13px;
+        color: #cfcfd4;
+        min-height: 18px;
+        margin-bottom: 8px;
+      }
+      #splashStatus.err { color: #ff9b9b; }
+      #splashStatus.ok  { color: #b9e6c1; }
+      #splash .instructions {
+        font-size: 12px;
+        color: #8b8b94;
+      }
+      #progress {
+        width: 300px;
+        height: 8px;
+        border-radius: 4px;
+        background: #2a2a31;
+        overflow: hidden;
+        position: relative;
+        margin: 12px auto 14px;
+      }
+      #progress .fill {
+        height: 100%;
+        width: 0%;
+        background: #4f7ad4;
+        border-radius: 4px;
+        transition: width 0.3s ease;
+      }
+      /* Sweep animates on the compositor (transform), so it keeps moving even
+         while the main thread is busy in a synchronous decode phase */
+      #progress .fizz {
+        position: absolute;
+        top: 0; bottom: 0; left: 0;
+        width: 45%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.45), transparent);
+        transform: translateX(-120%);
+        animation: sweep 1.1s linear infinite;
+        will-change: transform;
+        pointer-events: none;
+      }
+      @keyframes sweep {
+        0%   { transform: translateX(-120%); }
+        100% { transform: translateX(580%); }
+      }
+      #drop {
+        position: fixed; inset: 0;
+        display: none;
+        z-index: 60;
+        background: rgba(30, 34, 44, 0.75);
+        border: 3px dashed #6f8fd8;
+        color: #dfe8ff;
+        font-size: 28px;
+        text-align: center;
+        padding-top: 18vh;
+        pointer-events: none;
+      }
+      #drop.on { display: block; }
+      #fileInput { display: none; }
+    </style>
+  </head>
+  <body>
+    <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex=-1></canvas>
+    <div id="splash">
+      <div class="card">
+        <div class="logo">RawTherapee <span>WASM</span></div>
+        <div id="splashStatus">Loading runtime...</div>
+        <div id="progress"><div class="fill"></div><div class="fizz"></div></div>
+        <div class="instructions">Drop a RAW file anywhere, double-click, or press Ctrl+O</div>
+      </div>
+    </div>
+    <div id="drop">Drop RAW file</div>
+    <input type="file" id="fileInput" accept=".raw,.RAW,.cr2,.cr3,.nef,.arw,.dng,.orf,.rw2,.pef,.srw,.raf,.raw,image/*">
+
+    <script type='text/javascript'>
+      var splashEl = document.getElementById('splash');
+      var statusEl = document.getElementById('splashStatus');
+      var progressFill = document.getElementById('progress').firstElementChild;
+      var canvasElement = document.getElementById('canvas');
+      var inputElement = document.getElementById('fileInput');
+      var dropEl = document.getElementById('drop');
+      var runtimeReady = false;
+      var imageLoaded = false;
+      var decodeWorker = null;
+      var decodeBusy = false;
+
+      // Expose a debug handle so issues can be pinned down from the console.
+      window._wasmraw = {
+        get ready() { return runtimeReady; },
+        decode: function (bytes, name) {
+          if (!runtimeReady) return 'runtime-not-ready';
+          loadBytes(new Uint8Array(bytes), name || 'byte-buffer');
+          return 'scheduled';
+        }
+      };
+
+      function setStatus(text, cls) {
+        statusEl.textContent = text;
+        statusEl.className = cls || '';
+      }
+
+      function setProgress(pct, label) {
+        progressFill.style.width = pct + '%';
+        if (label) setStatus(label);
+      }
+
+      function hideSplash() {
+        splashEl.classList.add('hide');
+      }
+
+      canvasElement.addEventListener('webglcontextlost', (e) => {
+        alert('WebGL context lost. You will need to reload the page.');
+        e.preventDefault();
+      }, false);
+
+      // Size the canvas backing store to the CSS size times devicePixelRatio so
+      // the render is always sharp; C++ reads it each frame. Runs after the
+      // runtime is initialized so GLFW keeps ownership of the canvas first.
+      function fitCanvas() {
+        var dpr = window.devicePixelRatio || 1;
+        canvasElement.width = Math.round(window.innerWidth * dpr);
+        canvasElement.height = Math.round(window.innerHeight * dpr);
+      }
+      window.addEventListener('resize', function () { if (runtimeReady) fitCanvas(); });
+
+      function loadBytes(bytes, name) {
+        sendToWorker(new Uint8Array(bytes), name || 'byte-buffer');
+      }
+
+      function strToPtr(s) {
+        var n = (s.length + 1) * 4;
+        var p = Module._malloc(n);
+        Module.stringToUTF8(s, p, n);
+        return p;
+      }
+
+      function downloadBytes(bytes, name, type) {
+        var blob = new Blob([bytes], { type: type });
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
+        a.remove();
+      }
+
+      // The decoder worker owns LibRaw decode + full-res export; this page
+      // just forwards the file and receives preview/export results.
+      function onWorkerMessage(e) {
+        var m = e.data || {};
+        switch (m.type) {
+          case 'ready':
+            console.log('decoder: ready');
+            break;
+          case 'progress':
+            setProgress(m.pct, m.label);
+            break;
+          case 'decoded': {
+            decodeBusy = false;
+            var nbytes = m.pw * m.ph * 3 * 4;
+            var ptr = Module._malloc(nbytes);
+            Module.writeArrayToMemory(new Uint8Array(m.preview), ptr);
+            var makeP = strToPtr(m.make || ''), modelP = strToPtr(m.model || ''),
+                lensP = strToPtr(m.lens || ''), statusP = strToPtr(m.status || '');
+            try {
+              Module._wasm_accept_decode(ptr, m.w, m.h, m.pw, m.ph,
+                m.iso, m.shutter, m.aperture, m.focal,
+                makeP, modelP, lensP, statusP);
+            } finally {
+              Module._free(makeP); Module._free(modelP);
+              Module._free(lensP); Module._free(statusP);
+              Module._free(ptr);
+            }
+            setProgress(100);
+            imageLoaded = true;
+            hideSplash();
+            break;
+          }
+          case 'exported': {
+            var sp = strToPtr(m.status || '');
+            Module._wasm_set_export_status(sp);
+            Module._free(sp);
+            downloadBytes(new Uint8Array(m.bytes),
+                          m.fmt ? 'rawtherapee-export.jpg' : 'rawtherapee-export.png',
+                          m.fmt ? 'image/jpeg' : 'image/png');
+            break;
+          }
+          case 'export-error': {
+            var ep = strToPtr(m.msg || 'Export failed');
+            Module._wasm_set_export_status(ep);
+            Module._free(ep);
+            break;
+          }
+          case 'error':
+            decodeBusy = false;
+            setStatus(m.msg || 'Decoder error', 'err');
+            break;
+        }
+      }
+
+      function sendToWorker(bytes, name) {
+        if (!runtimeReady) { setStatus('Runtime not ready yet', 'err'); return; }
+        if (!decodeWorker) { setStatus('Decoder worker not ready', 'err'); return; }
+        if (decodeBusy) { setStatus('Already decoding a file - wait for it to finish', 'err'); return; }
+        decodeBusy = true;
+        setProgress(5, 'Reading ' + name + ' (' + (bytes.length / 1048576).toFixed(1) + ' MB) ...');
+        var ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        try {
+          decodeWorker.postMessage({ cmd: 'decode', file: ab, name: name }, [ab]);
+        } catch (err) {
+          decodeBusy = false;
+          setStatus('postMessage failed: ' + err, 'err');
+        }
+      }
+
+      function loadFile(file) {
+        if (!file) return;
+        var reader = new FileReader();
+        reader.onload = function (e) { loadBytes(new Uint8Array(e.target.result), file.name); };
+        reader.onerror = function () { setStatus('Could not read ' + file.name, 'err'); };
+        reader.readAsArrayBuffer(file);
+      }
+
+      // --- Drag & drop ---
+      var dragDepth = 0;
+      window.addEventListener('dragenter', function (e) {
+        e.preventDefault();
+        if (e.dataTransfer && e.dataTransfer.types &&
+            Array.prototype.indexOf.call(e.dataTransfer.types, 'Files') !== -1) {
+          dragDepth++;
+          dropEl.classList.add('on');
+        }
+      });
+      window.addEventListener('dragover', function (e) { e.preventDefault(); });
+      window.addEventListener('dragleave', function (e) {
+        e.preventDefault();
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) dropEl.classList.remove('on');
+      });
+      window.addEventListener('drop', function (e) {
+        e.preventDefault();
+        dragDepth = 0;
+        dropEl.classList.remove('on');
+        var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f) loadFile(f);
+      });
+
+      // --- File picker via double-click or keyboard ---
+      window.addEventListener('dblclick', function () { inputElement.click(); });
+      window.addEventListener('keydown', function (e) {
+        if (e.key === 'o' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); inputElement.click(); }
+      });
+      inputElement.addEventListener('change', function () {
+        if (inputElement.files && inputElement.files[0]) loadFile(inputElement.files[0]);
+        inputElement.value = '';
+      });
+
+      var Module = {
+        print: function () { console.log.apply(console, arguments); },
+        printErr: function () { console.error.apply(console, arguments); },
+        canvas: canvasElement,
+        setStatus: function (text) {
+          if (text) setStatus(text); // forward runtime load status only
+        },
+        onAbort: function (text) {
+          setStatus('Runtime aborted: ' + text, 'err');
+        },
+        onRuntimeInitialized: function () {
+          runtimeReady = true;
+          fitCanvas();
+          console.log('wasmraw: runtime initialized');
+          setStatus('Ready - drop a RAW file, double-click, or press Ctrl+O');
+          try {
+            if (typeof Worker === 'undefined') throw new Error('Worker API unavailable');
+            decodeWorker = new Worker('decoder-worker.js');
+            decodeWorker.onmessage = onWorkerMessage;
+            decodeWorker.onerror = function (e) {
+              setStatus('Decoder worker error: ' + (e.message || 'unknown'), 'err');
+            };
+            console.log('decoder: worker spawned');
+          } catch (err) {
+            setStatus('Could not start decoder worker: ' + err, 'err');
+          }
+        },
+        totalDependencies: 0,
+        monitorRunDependencies: function (left) {
+          this.totalDependencies = Math.max(this.totalDependencies, left);
+          if (left) setStatus('Preparing... (' + (this.totalDependencies - left) + '/' + this.totalDependencies + ')');
+        }
+      };
+      window.onerror = window.onunhandledrejection = function (msg, src, line, col, err) {
+        setStatus('Exception: ' + (err && err.message ? err.message : msg), 'err');
+      };
+
+      // If the runtime never becomes ready, report exactly why.
+      setTimeout(function () {
+        if (runtimeReady) return;
+        var moduleDefined = typeof Module !== 'undefined';
+        var detail = 'wasmraw.js loaded: ' + (moduleDefined ? 'yes' : 'NO');
+        if (moduleDefined) {
+          detail += '; HEAPU8: ' + (Module.HEAPU8 ? 'yes' : 'no')
+                  + '; _wasm_accept_decode: ' + (Module._wasm_accept_decode ? 'yes' : 'no');
+        }
+        console.error('wasmraw startup watchdog fired after 10s:', detail);
+        setStatus('Startup never finished. ' + detail + ' - check DevTools console / Network tab.', 'err');
+      }, 10000);
+
+      // Fail early, visibly, when runtime prerequisites are missing.
+      (function featureCheck() {
+        if (typeof WebAssembly === 'undefined') {
+          setStatus('WebAssembly is not supported in this browser', 'err');
+          return;
+        }
+        var probe = document.createElement('canvas');
+        if (!probe.getContext('webgl2')) {
+          setStatus('WebGL2 is not available - check hardware acceleration / GPU settings', 'err');
+        }
+      })();
+    </script>
+    {{{ SCRIPT }}}
+  </body>
+</html>

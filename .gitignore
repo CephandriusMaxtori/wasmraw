@@ -1,0 +1,9 @@
+build-wasm/
+build/
+smoke/smoke.js
+smoke/smoke.data
+smoke/smoke.wasm
+smoke/test.tiff
+smoke/test.dng
+smoke/demo-scene.dng
+test.tiff

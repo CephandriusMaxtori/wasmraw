@@ -1,0 +1,3 @@
+[submodule "RawTherapee"]
+	path = RawTherapee
+	url = https://github.com/RawTherapee/RawTherapee.git
