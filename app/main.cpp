@@ -90,6 +90,7 @@ static ImageDocument* g_dec = &g_empty;
 static bool g_wbPicking = false;
 static bool g_skipHistory = false;
 static bool g_controlHovered = false;
+static int g_requestedImageId = 0;
 
 static ImageDocument* FindDocument(int id)
 {
@@ -116,6 +117,7 @@ static bool EditStateEqual(const EditState& a, const EditState& b)
 }
 
 static void RequestPreview();
+static void ToneMapPreview();
 
 static const char* kWbPresets[] = { "Camera", "Daylight", "Cloudy", "Shade",
                                     "Tungsten", "Fluorescent", "Flash", "Custom" };
@@ -280,9 +282,13 @@ static void ActivateDocument(ImageDocument* doc)
 {
     if (!doc) return;
     g_dec = doc;
+    g_requestedImageId = doc->id;
     if (doc->loaded && !doc->rendered.empty() && doc->renderedWidth > 0 && doc->renderedHeight > 0)
         g_rgba = doc->rendered;
-    else
+    else if (doc->loaded && !doc->rgb.empty()) {
+        g_rgba.clear();
+        ToneMapPreview();
+    } else
         g_rgba.clear();
     g_texW = 0;
     g_texH = 0;
@@ -461,6 +467,7 @@ void wasm_accept_decode(int imageId, const float* preview, int w, int h, int pw,
     bool activate = (g_dec == &g_empty || g_dec->id == imageId);
     if (activate) {
         g_dec = doc;
+        g_requestedImageId = imageId;
         g_rgba.clear();
         g_texW = 0;
         g_texH = 0;
@@ -489,6 +496,7 @@ void wasm_accept_decode(int imageId, const float* preview, int w, int h, int pw,
     doc->lastError = 0;
     InitializeHistory(doc);
     if (activate) {
+        ToneMapPreview();
         g_previewDirty = true;
         g_histDirty = true;
         RequestPreview();
@@ -506,8 +514,12 @@ void wasm_accept_preview(int imageId, const unsigned char* rgba, int w, int h,
     doc->renderedHeight = h;
     doc->renderedRevision = revision;
     doc->renderedQuality = quality;
-    if (doc == g_dec) {
+    if (doc == g_dec || imageId == g_requestedImageId) {
+        g_dec = doc;
+        g_requestedImageId = imageId;
         g_rgba = doc->rendered;
+        g_texW = 0;
+        g_texH = 0;
         g_previewDirty = true;
         g_histDirty = true;
     }
