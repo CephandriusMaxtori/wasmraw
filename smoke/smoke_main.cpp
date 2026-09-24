@@ -9,11 +9,24 @@ extern "C" int dec_preview_ph();
 extern "C" int dec_w();
 extern "C" int dec_h();
 extern "C" const char* dec_meta_status();
+extern "C" int dec_render_preview(double exposure, double black, double white,
+                                 double contrast, double sat, double temperature, double tint,
+                                 double wbR, double wbG, double wbB, double vignette,
+                                 double clarity, double clarityRadius, double sharpening,
+                                 double sharpenRadius, double denoise, double vibrance,
+                                 double ca, double distortion, double shadows, double highlights,
+                                 double cy0, double cy1, double cy2, double cy3, double cy4,
+                                 int quality);
+extern "C" const unsigned char* dec_rendered_preview_ptr();
+extern "C" size_t dec_rendered_preview_size();
+extern "C" int dec_rendered_preview_width();
+extern "C" int dec_rendered_preview_height();
 extern "C" int dec_export_write(double exposure, double black, double white,
-                                double contrast, double sat,
+                                double contrast, double sat, double temperature, double tint,
                                 double wbR, double wbG, double wbB, double vignette,
-                                double clarity, double clarityRadius,
-                                double shadows, double highlights,
+                                double clarity, double clarityRadius, double sharpening,
+                                double sharpenRadius, double denoise, double vibrance,
+                                double ca, double distortion, double shadows, double highlights,
                                 double cy0, double cy1, double cy2, double cy3, double cy4,
                                 int format, int quality);
 extern "C" size_t dec_export_size();
@@ -61,9 +74,23 @@ int main(int argc, char** argv)
         printf("PREVIEW pw=%d ph=%d count=%zu min=%.4f max=%.4f mean=%.4f\n",
                pw, ph, count, (double)mn, (double)mx, (double)(sum / (float)count));
 
+        int rendered = dec_render_preview(0.0, 0.0, 1.0, 0.0, 1.0,
+                                          0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
+                                          0.2, 2.0, 0.2, 1.0, 0.1, 0.2,
+                                          0.1, 0.1, 0.2, 0.1,
+                                          0.0, 0.25, 0.5, 0.75, 1.0, 1);
+        size_t renderedSize = dec_rendered_preview_size();
+        bool renderedOk = rendered && dec_rendered_preview_ptr() &&
+                          dec_rendered_preview_width() == pw &&
+                          dec_rendered_preview_height() == ph &&
+                          renderedSize == (size_t)pw * ph * 4;
+        printf("PREVIEW-RENDER ok=%d size=%u\n", renderedOk ? 1 : 0, (unsigned)renderedSize);
+        if (!renderedOk) r = 1;
+
         int okPng = dec_export_write(0.0, 0.0, 1.0, 0.0, 1.0,
-                                     1.0, 1.0, 1.0, 0.25,
-                                     0.3, 2.0, 0.2, 0.1,
+                                     0.0, 0.0, 1.0, 1.0, 1.0, 0.25,
+                                     0.3, 2.0, 0.2, 1.0, 0.1, 0.0,
+                                     0.0, 0.0, 0.2, 0.1,
                                      0.0, 0.25, 0.5, 0.75, 1.0, 0, 0);
         size_t pngSz = dec_export_size();
         const unsigned char* png = dec_export_data();
@@ -72,8 +99,9 @@ int main(int argc, char** argv)
                pngOk ? 1 : 0);
 
         int okJpg = dec_export_write(0.0, 0.0, 1.0, 0.0, 1.0,
-                                     1.0, 1.0, 1.0, -0.25,
-                                     0.0, 2.0, -0.2, -0.1,
+                                     0.0, 0.0, 1.0, 1.0, 1.0, -0.25,
+                                     0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
+                                     0.0, 0.0, -0.2, -0.1,
                                      0.0, 0.25, 0.5, 0.75, 1.0, 1, 90);
         size_t jpgSz = dec_export_size();
         const unsigned char* jpg = dec_export_data();

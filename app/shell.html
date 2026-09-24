@@ -177,7 +177,8 @@
           workerReady: false,
           decodeQueued: false,
           revision: 0,
-          previewRequestId: 0
+          previewRequestId: 0,
+          lastPreview: null
         };
         imageCatalog.push(record);
         var namePtr = strToPtr(record.name);
@@ -358,6 +359,14 @@
             } finally {
               Module._free(previewPtr);
             }
+            if (message.quality === 0 && previewRecord.revision === message.revision &&
+                previewRecord.lastPreview && activeWorkerImageId === message.imageId) {
+              var finalRequest = Object.assign({}, previewRecord.lastPreview);
+              finalRequest.requestId = nextRequestId++;
+              finalRequest.quality = 1;
+              previewRecord.previewRequestId = finalRequest.requestId;
+              decodeWorker.postMessage(finalRequest);
+            }
             if (message.imageId === activeImageId) setStatus('Ready');
             break;
           }
@@ -403,20 +412,26 @@
       }
 
       function requestPreview(imageId, revision, exp, black, white, contrast, sat,
-                              wbR, wbG, wbB, vignette, clarity, clarityRadius,
-                              shadows, highlights, cy0, cy1, cy2, cy3, cy4, quality) {
+                              temperature, tint, wbR, wbG, wbB, vignette,
+                              clarity, clarityRadius, sharpening, sharpenRadius,
+                              denoise, vibrance, ca, distortion, shadows, highlights,
+                              cy0, cy1, cy2, cy3, cy4, quality) {
         var record = findRecord(imageId);
         if (!record || !decodeWorker) return;
         record.revision = revision;
         pendingPreview = {
           cmd: 'process', imageId: imageId, requestId: nextRequestId++,
           revision: revision, exp: exp, black: black, white: white,
-          contrast: contrast, sat: sat, wbR: wbR, wbG: wbG, wbB: wbB,
-          vignette: vignette, clarity: clarity, clarityRadius: clarityRadius,
+          contrast: contrast, sat: sat, temperature: temperature, tint: tint,
+          wbR: wbR, wbG: wbG, wbB: wbB, vignette: vignette,
+          clarity: clarity, clarityRadius: clarityRadius,
+          sharpening: sharpening, sharpenRadius: sharpenRadius,
+          denoise: denoise, vibrance: vibrance, ca: ca, distortion: distortion,
           shadows: shadows, highlights: highlights,
           cy0: cy0, cy1: cy1, cy2: cy2, cy3: cy3, cy4: cy4,
-          quality: quality || 1
+          quality: quality === undefined ? 1 : quality
         };
+        record.lastPreview = pendingPreview;
         record.previewRequestId = pendingPreview.requestId;
         if (previewTimer) return;
         previewTimer = setTimeout(function () {
@@ -429,8 +444,10 @@
       }
 
       function requestExport(imageId, revision, fmt, exp, black, white, contrast, sat,
-                             wbR, wbG, wbB, vignette, clarity, clarityRadius,
-                             shadows, highlights, cy0, cy1, cy2, cy3, cy4, quality) {
+                             temperature, tint, wbR, wbG, wbB, vignette,
+                             clarity, clarityRadius, sharpening, sharpenRadius,
+                             denoise, vibrance, ca, distortion, shadows, highlights,
+                             cy0, cy1, cy2, cy3, cy4, quality) {
         if (!decodeWorker) return;
         if (activeWorkerImageId !== imageId) {
           updateRecordStatus(imageId, 'Select image before exporting');
@@ -439,8 +456,11 @@
         decodeWorker.postMessage({
           cmd: 'export', imageId: imageId, requestId: nextRequestId++, revision: revision,
           fmt: fmt, exp: exp, black: black, white: white, contrast: contrast, sat: sat,
-          wbR: wbR, wbG: wbG, wbB: wbB, vignette: vignette, clarity: clarity,
-          clarityRadius: clarityRadius, shadows: shadows, highlights: highlights,
+          temperature: temperature, tint: tint, wbR: wbR, wbG: wbG, wbB: wbB,
+          vignette: vignette, clarity: clarity, clarityRadius: clarityRadius,
+          sharpening: sharpening, sharpenRadius: sharpenRadius, denoise: denoise,
+          vibrance: vibrance, ca: ca, distortion: distortion,
+          shadows: shadows, highlights: highlights,
           cy0: cy0, cy1: cy1, cy2: cy2, cy3: cy3, cy4: cy4,
           quality: Math.floor(quality)
         });

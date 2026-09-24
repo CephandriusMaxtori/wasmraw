@@ -286,8 +286,11 @@ const char* dec_meta_status() { return g_dec.status; }
 
 EMSCRIPTEN_KEEPALIVE
 int dec_render_preview(double exposure, double black, double white, double contrast,
-                       double sat, double wbR, double wbG, double wbB, double vignette,
-                       double clarity, double clarityRadius, double shadows, double highlights,
+                       double sat, double temperature, double tint,
+                       double wbR, double wbG, double wbB, double vignette,
+                       double clarity, double clarityRadius, double sharpening,
+                       double sharpenRadius, double denoise, double vibrance,
+                       double ca, double distortion, double shadows, double highlights,
                        double cy0, double cy1, double cy2, double cy3, double cy4,
                        int quality)
 {
@@ -300,12 +303,20 @@ int dec_render_preview(double exposure, double black, double white, double contr
     p.white = (float)white;
     p.contrast = (float)contrast;
     p.saturation = (float)sat;
+    p.temperature = (float)temperature;
+    p.tint = (float)tint;
     p.wbR = (float)wbR;
     p.wbG = (float)wbG;
     p.wbB = (float)wbB;
     p.vignette = (float)vignette;
     p.clarity = quality == 0 ? 0.f : (float)clarity;
     p.clarityRadius = (float)clarityRadius;
+    p.sharpening = quality == 0 ? 0.f : (float)sharpening;
+    p.sharpenRadius = (float)sharpenRadius;
+    p.denoise = quality == 0 ? 0.f : (float)denoise;
+    p.vibrance = (float)vibrance;
+    p.ca = (float)ca;
+    p.distortion = (float)distortion;
     p.shadows = (float)shadows;
     p.highlights = (float)highlights;
     p.curveY[0] = (float)cy0;
@@ -339,9 +350,11 @@ int dec_rendered_preview_height() { return g_dec.ph; }
 // result (format 0 = PNG, 1 = JPEG). Runs entirely on the worker thread.
 EMSCRIPTEN_KEEPALIVE
 int dec_export_write(double exposure, double black, double white, double contrast,
-                     double sat, double wbR, double wbG, double wbB, double vignette,
-                     double clarity, double clarityRadius,
-                     double shadows, double highlights,
+                     double sat, double temperature, double tint,
+                     double wbR, double wbG, double wbB, double vignette,
+                     double clarity, double clarityRadius, double sharpening,
+                     double sharpenRadius, double denoise, double vibrance,
+                     double ca, double distortion, double shadows, double highlights,
                      double cy0, double cy1, double cy2, double cy3, double cy4,
                      int format, int quality)
 {
@@ -357,12 +370,20 @@ int dec_export_write(double exposure, double black, double white, double contras
     p.white = (float)white;
     p.contrast = (float)contrast;
     p.saturation = (float)sat;
+    p.temperature = (float)temperature;
+    p.tint = (float)tint;
     p.wbR = (float)wbR;
     p.wbG = (float)wbG;
     p.wbB = (float)wbB;
     p.vignette = (float)vignette;
     p.clarity = (float)clarity;
     p.clarityRadius = (float)clarityRadius;
+    p.sharpening = (float)sharpening;
+    p.sharpenRadius = (float)sharpenRadius;
+    p.denoise = (float)denoise;
+    p.vibrance = (float)vibrance;
+    p.ca = (float)ca;
+    p.distortion = (float)distortion;
     p.shadows = (float)shadows;
     p.highlights = (float)highlights;
     p.curveY[0] = (float)cy0;

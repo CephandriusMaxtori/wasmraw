@@ -26,6 +26,14 @@ struct EditState {
     int vignette = 0;
     float clarity = 0.0f;
     float clarityRadius = 2.0f;
+    int temperature = 0;
+    int tint = 0;
+    int sharpening = 0;
+    float sharpenRadius = 1.0f;
+    int denoise = 0;
+    int vibrance = 0;
+    int ca = 0;
+    int distortion = 0;
     int shadows = 0;
     int highlights = 0;
     float wb[3] = { 1.0f, 1.0f, 1.0f };
@@ -53,6 +61,10 @@ struct ImageDocument : EditState {
     int w = 0, h = 0, colors = 0, bits = 0;
     int pw = 0, ph = 0;
     std::vector<float> rgb;
+    std::vector<unsigned char> thumbnail;
+    GLuint thumbnailTexture = 0;
+    int thumbnailWidth = 0;
+    int thumbnailHeight = 0;
     bool hasFullRes = false;
     int fw = 0, fh = 0;
     char make[64] = {0};
@@ -71,12 +83,30 @@ static std::deque<ImageDocument> g_images;
 static ImageDocument g_empty;
 static ImageDocument* g_dec = &g_empty;
 static bool g_wbPicking = false;
+static bool g_skipHistory = false;
 
 static ImageDocument* FindDocument(int id)
 {
     for (ImageDocument& doc : g_images)
         if (doc.id == id) return &doc;
     return nullptr;
+}
+
+static bool EditStateEqual(const EditState& a, const EditState& b)
+{
+    return a.exposure == b.exposure && a.black == b.black && a.white == b.white &&
+           a.contrast == b.contrast && a.saturation == b.saturation &&
+           a.temperature == b.temperature && a.tint == b.tint &&
+           a.vignette == b.vignette && a.clarity == b.clarity &&
+           a.clarityRadius == b.clarityRadius && a.sharpening == b.sharpening &&
+           a.sharpenRadius == b.sharpenRadius && a.denoise == b.denoise &&
+           a.vibrance == b.vibrance && a.ca == b.ca && a.distortion == b.distortion &&
+           a.shadows == b.shadows && a.highlights == b.highlights &&
+           a.wbPreset == b.wbPreset && a.jpegQuality == b.jpegQuality &&
+           a.wb[0] == b.wb[0] && a.wb[1] == b.wb[1] && a.wb[2] == b.wb[2] &&
+           a.curveY[0] == b.curveY[0] && a.curveY[1] == b.curveY[1] &&
+           a.curveY[2] == b.curveY[2] && a.curveY[3] == b.curveY[3] &&
+           a.curveY[4] == b.curveY[4];
 }
 
 static void RequestPreview();
@@ -101,6 +131,7 @@ static bool g_previewDirty = true;
 static bool g_zoomFit = true;
 static float g_zoom = 1.0f;
 static ImVec2 g_pan(0.0f, 0.0f);
+static ImVec2 g_previewContentSize(0.0f, 0.0f);
 static std::vector<unsigned char> g_rgba;
 static char g_exportStatus[160] = "";
 static const int kPreviewMaxDim = 1600;
@@ -149,6 +180,39 @@ static void CreatePlaceholderTexture()
     g_texH = h;
 }
 
+static void BuildThumbnail(ImageDocument* doc)
+{
+    if (!doc || !doc->loaded || doc->pw <= 0 || doc->ph <= 0) return;
+    const int maxSide = 160;
+    const float scale = std::min(1.0f, (float)maxSide / (float)std::max(doc->pw, doc->ph));
+    const int width = std::max(1, (int)(doc->pw * scale));
+    const int height = std::max(1, (int)(doc->ph * scale));
+    std::vector<unsigned char> pixels((size_t)width * height * 4);
+    for (int y = 0; y < height; ++y) {
+        int sy = std::clamp((int)((y + 0.5f) / scale), 0, doc->ph - 1);
+        for (int x = 0; x < width; ++x) {
+            int sx = std::clamp((int)((x + 0.5f) / scale), 0, doc->pw - 1);
+            const float* source = &doc->rgb[((size_t)sy * doc->pw + sx) * 3];
+            size_t index = ((size_t)y * width + x) * 4;
+            pixels[index + 0] = (unsigned char)(tone::SrgbEncode(source[0]) * 255.0f + 0.5f);
+            pixels[index + 1] = (unsigned char)(tone::SrgbEncode(source[1]) * 255.0f + 0.5f);
+            pixels[index + 2] = (unsigned char)(tone::SrgbEncode(source[2]) * 255.0f + 0.5f);
+            pixels[index + 3] = 255;
+        }
+    }
+    if (doc->thumbnailTexture) glDeleteTextures(1, &doc->thumbnailTexture);
+    glGenTextures(1, &doc->thumbnailTexture);
+    glBindTexture(GL_TEXTURE_2D, doc->thumbnailTexture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    doc->thumbnail = std::move(pixels);
+    doc->thumbnailWidth = width;
+    doc->thumbnailHeight = height;
+}
+
 static void InitializeHistory(ImageDocument* doc)
 {
     if (!doc || !doc->history.empty()) return;
@@ -163,6 +227,7 @@ static void RecordHistory(ImageDocument* doc, const char* label)
 {
     if (!doc) return;
     InitializeHistory(doc);
+    if (doc->historyPos >= 0 && EditStateEqual(doc->history[doc->historyPos].state, *doc)) return;
     if (doc->historyPos + 1 < (int)doc->history.size())
         doc->history.resize(doc->historyPos + 1);
     HistoryEntry entry;
@@ -176,6 +241,7 @@ static void ApplyEditState(const EditState& state)
 {
     if (!g_dec) return;
     static_cast<EditState&>(*g_dec) = state;
+    g_skipHistory = true;
     g_dec->revision++;
     g_previewDirty = true;
     g_histDirty = true;
@@ -225,9 +291,17 @@ static tone::Params CurrentToneParams()
     p.white = (float)g_dec->white / 100.0f;
     p.contrast = g_dec->contrast / 100.0f;
     p.saturation = g_dec->saturation / 100.0f;
+    p.temperature = (float)g_dec->temperature / 100.0f;
+    p.tint = (float)g_dec->tint / 100.0f;
     p.vignette = (float)g_dec->vignette / 100.0f;
     p.clarity = g_dec->clarity / 100.0f;
     p.clarityRadius = g_dec->clarityRadius;
+    p.sharpening = (float)g_dec->sharpening / 100.0f;
+    p.sharpenRadius = g_dec->sharpenRadius;
+    p.denoise = (float)g_dec->denoise / 100.0f;
+    p.vibrance = (float)g_dec->vibrance / 100.0f;
+    p.ca = (float)g_dec->ca / 100.0f;
+    p.distortion = (float)g_dec->distortion / 100.0f;
     p.shadows = (float)g_dec->shadows / 100.0f;
     p.highlights = (float)g_dec->highlights / 100.0f;
     p.wbR = g_dec->wb[0]; p.wbG = g_dec->wb[1]; p.wbB = g_dec->wb[2];
@@ -272,15 +346,17 @@ static void RebuildPreview()
 #ifdef __EMSCRIPTEN__
 EM_JS(void, js_request_preview, (int imageId, int revision,
                                   double exp, double black, double white,
-                                  double contrast, double sat,
+                                  double contrast, double sat, double temperature, double tint,
                                   double wbR, double wbG, double wbB, double vignette,
-                                  double clarity, double clarityRadius,
-                                  double shadows, double highlights,
+                                  double clarity, double clarityRadius, double sharpening,
+                                  double sharpenRadius, double denoise, double vibrance,
+                                  double ca, double distortion, double shadows, double highlights,
                                   double cy0, double cy1, double cy2, double cy3, double cy4,
                                   int quality), {
     if (!window._wasmraw || !window._wasmraw.requestPreview) return;
     window._wasmraw.requestPreview(imageId, revision, exp, black, white, contrast, sat,
-        wbR, wbG, wbB, vignette, clarity, clarityRadius, shadows, highlights,
+        temperature, tint, wbR, wbG, wbB, vignette, clarity, clarityRadius,
+        sharpening, sharpenRadius, denoise, vibrance, ca, distortion, shadows, highlights,
         cy0, cy1, cy2, cy3, cy4, quality);
 });
 #endif
@@ -295,14 +371,22 @@ static void RequestPreview()
                        (double)g_dec->white / 100.0,
                        (double)g_dec->contrast / 100.0,
                        (double)g_dec->saturation / 100.0,
+                       (double)g_dec->temperature / 100.0,
+                       (double)g_dec->tint / 100.0,
                        g_dec->wb[0], g_dec->wb[1], g_dec->wb[2],
                        (double)g_dec->vignette / 100.0,
                        (double)g_dec->clarity / 100.0,
                        g_dec->clarityRadius,
+                       (double)g_dec->sharpening / 100.0,
+                       g_dec->sharpenRadius,
+                       (double)g_dec->denoise / 100.0,
+                       (double)g_dec->vibrance / 100.0,
+                       (double)g_dec->ca / 100.0,
+                       (double)g_dec->distortion / 100.0,
                        (double)g_dec->shadows / 100.0,
                        (double)g_dec->highlights / 100.0,
                        g_dec->curveY[0], g_dec->curveY[1], g_dec->curveY[2], g_dec->curveY[3], g_dec->curveY[4],
-                       1);
+                       0);
 #else
     g_previewDirty = true;
 #endif
@@ -386,6 +470,7 @@ void wasm_accept_decode(int imageId, const float* preview, int w, int h, int pw,
     snprintf(doc->lens, sizeof(doc->lens), "%s", lens ? lens : "");
     snprintf(doc->lastStatus, sizeof(doc->lastStatus), "%s", status ? status : "Decoded");
     doc->rgb.assign(preview, preview + (size_t)pw * ph * 3);
+    BuildThumbnail(doc);
     doc->lastError = 0;
     InitializeHistory(doc);
     if (activate) {
@@ -418,16 +503,18 @@ void wasm_set_export_status(int imageId, const char* text)
 
 #ifdef __EMSCRIPTEN__
 EM_JS(void, js_request_export, (int imageId, int revision, int fmt, double exp, double black, double white,
-                                double contrast, double sat,
+                                double contrast, double sat, double temperature, double tint,
                                 double wbR, double wbG, double wbB, double vignette,
-                                double clarity, double clarityRadius,
-                                double shadows, double highlights,
+                                double clarity, double clarityRadius, double sharpening,
+                                double sharpenRadius, double denoise, double vibrance,
+                                double ca, double distortion, double shadows, double highlights,
                                 double cy0, double cy1, double cy2, double cy3, double cy4,
                                 double quality), {
     if (!window._wasmraw || !window._wasmraw.requestExport) return;
     window._wasmraw.requestExport(imageId, revision, fmt, exp, black, white,
-        contrast, sat, wbR, wbG, wbB, vignette, clarity, clarityRadius,
-        shadows, highlights, cy0, cy1, cy2, cy3, cy4, Math.floor(quality));
+        contrast, sat, temperature, tint, wbR, wbG, wbB, vignette, clarity, clarityRadius,
+        sharpening, sharpenRadius, denoise, vibrance, ca, distortion, shadows, highlights,
+        cy0, cy1, cy2, cy3, cy4, Math.floor(quality));
 });
 
 EM_JS(void, js_select_image, (int imageId), {
@@ -447,10 +534,18 @@ static void RequestExport(int format)
                       (double)g_dec->white / 100.0,
                       (double)g_dec->contrast / 100.0,
                       (double)g_dec->saturation / 100.0,
+                      (double)g_dec->temperature / 100.0,
+                      (double)g_dec->tint / 100.0,
                       g_dec->wb[0], g_dec->wb[1], g_dec->wb[2],
                       (double)g_dec->vignette / 100.0,
                       (double)g_dec->clarity / 100.0,
-                      (double)g_dec->clarityRadius,
+                      g_dec->clarityRadius,
+                      (double)g_dec->sharpening / 100.0,
+                      g_dec->sharpenRadius,
+                      (double)g_dec->denoise / 100.0,
+                      (double)g_dec->vibrance / 100.0,
+                      (double)g_dec->ca / 100.0,
+                      (double)g_dec->distortion / 100.0,
                       (double)g_dec->shadows / 100.0,
                       (double)g_dec->highlights / 100.0,
                       g_dec->curveY[0], g_dec->curveY[1], g_dec->curveY[2], g_dec->curveY[3], g_dec->curveY[4],
@@ -633,6 +728,68 @@ static void DrawHistogram()
     ImGui::End();
 }
 
+static void DrawNavigator()
+{
+    ImGui::Begin("Navigator");
+    if (!g_dec->loaded || !g_tex || g_texW <= 0 || g_texH <= 0) {
+        ImGui::TextDisabled("No image loaded");
+        ImGui::End();
+        return;
+    }
+
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    if (avail.x < 40.0f || avail.y < 40.0f) {
+        ImGui::End();
+        return;
+    }
+    const float imageWidth = (float)g_texW;
+    const float imageHeight = (float)g_texH;
+    const float scale = std::min(avail.x / imageWidth, avail.y / imageHeight);
+    const ImVec2 shown(imageWidth * scale, imageHeight * scale);
+    ImGui::InvisibleButton("navigator_view", shown);
+    const ImVec2 origin = ImGui::GetItemRectMin();
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddImage((ImTextureID)(intptr_t)g_tex, origin, ImVec2(origin.x + shown.x, origin.y + shown.y));
+
+    float viewScale = g_zoomFit
+        ? std::min((g_previewContentSize.x > 0.f ? g_previewContentSize.x : avail.x) / imageWidth,
+                   (g_previewContentSize.y > 0.f ? g_previewContentSize.y : avail.y) / imageHeight)
+        : g_zoom;
+    viewScale = std::max(0.05f, viewScale);
+    const float visibleWidth = std::min(imageWidth, (g_previewContentSize.x > 0.f ? g_previewContentSize.x : avail.x) / viewScale);
+    const float visibleHeight = std::min(imageHeight, (g_previewContentSize.y > 0.f ? g_previewContentSize.y : avail.y) / viewScale);
+    const float centerX = imageWidth * 0.5f - g_pan.x / viewScale;
+    const float centerY = imageHeight * 0.5f - g_pan.y / viewScale;
+    const float x0 = std::max(0.0f, centerX - visibleWidth * 0.5f);
+    const float y0 = std::max(0.0f, centerY - visibleHeight * 0.5f);
+    const float x1 = std::min(imageWidth, centerX + visibleWidth * 0.5f);
+    const float y1 = std::min(imageHeight, centerY + visibleHeight * 0.5f);
+    drawList->AddRect(ImVec2(origin.x + x0 * scale, origin.y + y0 * scale),
+                      ImVec2(origin.x + x1 * scale, origin.y + y1 * scale),
+                      IM_COL32(255, 180, 80, 220), 0, 1.5f);
+
+    if (hovered) {
+        float u = (mouse.x - origin.x) / shown.x;
+        float v = (mouse.y - origin.y) / shown.y;
+        if (u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f) {
+            int px = std::clamp((int)(u * (g_dec->pw - 1)), 0, g_dec->pw - 1);
+            int py = std::clamp((int)(v * (g_dec->ph - 1)), 0, g_dec->ph - 1);
+            const float* pixel = &g_dec->rgb[((size_t)py * g_dec->pw + px) * 3];
+            ImGui::Text("Pixel %d, %d", px, py);
+            ImGui::Text("RGB %.3f %.3f %.3f", pixel[0], pixel[1], pixel[2]);
+            if (ImGui::IsMouseClicked(0)) {
+                g_zoomFit = false;
+                g_zoom = viewScale;
+                g_pan.x = (px + 0.5f - imageWidth * 0.5f) * viewScale;
+                g_pan.y = (py + 0.5f - imageHeight * 0.5f) * viewScale;
+            }
+        }
+    }
+    ImGui::End();
+}
+
 static void DrawHistory()
 {
     ImGui::Begin("History");
@@ -676,16 +833,24 @@ static void DrawFilmstrip()
     }
     for (ImageDocument& doc : g_images) {
         ImGui::PushID(doc.id);
-        bool selected = &doc == g_dec;
-        if (ImGui::Selectable(doc.name[0] ? doc.name : "Unnamed image", selected)) {
+        bool clicked = false;
+        if (doc.thumbnailTexture)
+            clicked = ImGui::ImageButton("##thumbnail", (ImTextureID)(intptr_t)doc.thumbnailTexture,
+                                         ImVec2(128.0f, 80.0f));
+        else
+            clicked = ImGui::Button("No preview", ImVec2(128.0f, 80.0f));
+        if (clicked) {
             ActivateDocument(&doc);
 #ifdef __EMSCRIPTEN__
             js_select_image(doc.id);
 #endif
         }
-        ImGui::PopID();
-        ImGui::SameLine();
+        if (&doc == g_dec)
+            ImGui::TextColored(ImVec4(0.45f, 0.65f, 1.0f, 1.0f), "%s", doc.name);
+        else
+            ImGui::TextUnformatted(doc.name);
         ImGui::TextDisabled("%s", doc.lastStatus);
+        ImGui::PopID();
     }
     ImGui::End();
 }
@@ -707,6 +872,21 @@ static void DrawToolbox()
     ImGui::SliderInt("Highlights", &g_dec->highlights, -100, 100, "%d");
     ImGui::SliderFloat("Clarity", &g_dec->clarity, -100.0f, 100.0f, "%.0f");
     ImGui::SliderFloat("Radius", &g_dec->clarityRadius, 0.5f, 3.0f, "%.1f px");
+
+    if (ImGui::CollapsingHeader("Color")) {
+        ImGui::SliderInt("Temperature", &g_dec->temperature, -100, 100, "%d");
+        ImGui::SliderInt("Tint", &g_dec->tint, -100, 100, "%d");
+        ImGui::SliderInt("Vibrance", &g_dec->vibrance, -100, 100, "%d");
+    }
+    if (ImGui::CollapsingHeader("Detail")) {
+        ImGui::SliderInt("Sharpening", &g_dec->sharpening, -100, 100, "%d");
+        ImGui::SliderFloat("Sharpening radius", &g_dec->sharpenRadius, 0.5f, 3.0f, "%.1f px");
+        ImGui::SliderInt("Noise reduction", &g_dec->denoise, 0, 100, "%d");
+    }
+    if (ImGui::CollapsingHeader("Lens corrections")) {
+        ImGui::SliderInt("Chromatic aberration", &g_dec->ca, -100, 100, "%d");
+        ImGui::SliderInt("Distortion", &g_dec->distortion, -100, 100, "%d");
+    }
 
     ImGui::Separator();
     ImGui::TextUnformatted("White balance");
@@ -742,7 +922,10 @@ static void DrawToolbox()
     if (ImGui::Button("Reset tone")) {
         g_dec->exposure = 0.0f; g_dec->black = 0; g_dec->white = 100;
         g_dec->contrast = 0.0f; g_dec->saturation = 100.0f; g_dec->vignette = 0;
+        g_dec->temperature = 0; g_dec->tint = 0; g_dec->vibrance = 0;
         g_dec->clarity = 0.0f; g_dec->clarityRadius = 2.0f;
+        g_dec->sharpening = 0; g_dec->sharpenRadius = 1.0f; g_dec->denoise = 0;
+        g_dec->ca = 0; g_dec->distortion = 0;
         g_dec->shadows = 0; g_dec->highlights = 0;
         g_dec->wb[0] = g_dec->wb[1] = g_dec->wb[2] = 1.0f; g_dec->wbPreset = 0;
         for (int i = 0; i < 5; ++i) g_dec->curveY[i] = 0.25f * (float)i;
@@ -788,6 +971,7 @@ static void DrawPreview()
     ImGui::TextDisabled("%d x %d", g_texW, g_texH);
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
+    g_previewContentSize = avail;
     const float pw = (float)g_texW, ph = (float)g_texH;
 
     float viewScale;
@@ -989,6 +1173,7 @@ static void RenderFrame(GLFWwindow* window)
     ImGui::End();
 
     DrawPreview();
+    DrawNavigator();
     DrawFilmstrip();
     DrawHistory();
     DrawToolbox();
@@ -1053,15 +1238,7 @@ int main()
 
     CreatePlaceholderTexture();
 
-    // Track slider edits to avoid pointless per-frame rebuilds
-    float lastExposure = g_dec->exposure;
-    int lastBlack = g_dec->black, lastWhite = g_dec->white;
-    float lastContrast = g_dec->contrast, lastSat = g_dec->saturation;
-    int lastVig = g_dec->vignette, lastShadows = g_dec->shadows, lastHighlights = g_dec->highlights;
-    float lastClarity = g_dec->clarity, lastClarityRadius = g_dec->clarityRadius;
-    float lastWb0 = g_dec->wb[0], lastWb1 = g_dec->wb[1], lastWb2 = g_dec->wb[2];
-    float lastCurve0 = g_dec->curveY[0], lastCurve1 = g_dec->curveY[1], lastCurve2 = g_dec->curveY[2];
-    float lastCurve3 = g_dec->curveY[3], lastCurve4 = g_dec->curveY[4];
+    EditState lastEditState = static_cast<const EditState&>(*g_dec);
     bool historyPending = false;
     float historyDelay = 0.0f;
     int lastDocumentId = g_dec->id;
@@ -1074,45 +1251,19 @@ int main()
     {
         if (g_dec->id != lastDocumentId) {
             lastDocumentId = g_dec->id;
-            lastExposure = g_dec->exposure;
-            lastBlack = g_dec->black;
-            lastWhite = g_dec->white;
-            lastContrast = g_dec->contrast;
-            lastSat = g_dec->saturation;
-            lastVig = g_dec->vignette;
-            lastShadows = g_dec->shadows;
-            lastHighlights = g_dec->highlights;
-            lastClarity = g_dec->clarity;
-            lastClarityRadius = g_dec->clarityRadius;
-            lastWb0 = g_dec->wb[0];
-            lastWb1 = g_dec->wb[1];
-            lastWb2 = g_dec->wb[2];
-            lastCurve0 = g_dec->curveY[0];
-            lastCurve1 = g_dec->curveY[1];
-            lastCurve2 = g_dec->curveY[2];
-            lastCurve3 = g_dec->curveY[3];
-            lastCurve4 = g_dec->curveY[4];
+            lastEditState = static_cast<const EditState&>(*g_dec);
             historyPending = false;
         }
-        if (g_dec->exposure != lastExposure || g_dec->black != lastBlack || g_dec->white != lastWhite ||
-            g_dec->contrast != lastContrast || g_dec->saturation != lastSat ||
-            g_dec->vignette != lastVig || g_dec->shadows != lastShadows || g_dec->highlights != lastHighlights ||
-            g_dec->clarity != lastClarity || g_dec->clarityRadius != lastClarityRadius ||
-            g_dec->wb[0] != lastWb0 || g_dec->wb[1] != lastWb1 || g_dec->wb[2] != lastWb2 ||
-            g_dec->curveY[0] != lastCurve0 || g_dec->curveY[1] != lastCurve1 ||
-            g_dec->curveY[2] != lastCurve2 || g_dec->curveY[3] != lastCurve3 ||
-            g_dec->curveY[4] != lastCurve4) {
+        if (!EditStateEqual(static_cast<const EditState&>(*g_dec), lastEditState)) {
             MarkToneDirty();
             RequestPreview();
-            historyPending = g_dec->id > 0;
-            historyDelay = 0.25f;
-            lastExposure = g_dec->exposure; lastBlack = g_dec->black; lastWhite = g_dec->white;
-            lastContrast = g_dec->contrast; lastSat = g_dec->saturation; lastVig = g_dec->vignette;
-            lastShadows = g_dec->shadows; lastHighlights = g_dec->highlights;
-            lastClarity = g_dec->clarity; lastClarityRadius = g_dec->clarityRadius;
-            lastWb0 = g_dec->wb[0]; lastWb1 = g_dec->wb[1]; lastWb2 = g_dec->wb[2];
-            lastCurve0 = g_dec->curveY[0]; lastCurve1 = g_dec->curveY[1]; lastCurve2 = g_dec->curveY[2];
-            lastCurve3 = g_dec->curveY[3];             lastCurve4 = g_dec->curveY[4];
+            if (g_skipHistory) {
+                g_skipHistory = false;
+            } else {
+                historyPending = g_dec->id > 0;
+                historyDelay = 0.25f;
+            }
+            lastEditState = static_cast<const EditState&>(*g_dec);
         }
         if (historyPending) {
             historyDelay -= io.DeltaTime;

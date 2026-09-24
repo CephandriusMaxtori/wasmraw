@@ -108,12 +108,15 @@ function handleDecode(request) {
 }
 
 function handleProcess(request) {
+  var quality = request.quality === undefined ? 1 : request.quality;
   var result = Module._dec_render_preview(
     request.exp, request.black, request.white, request.contrast, request.sat,
-    request.wbR, request.wbG, request.wbB, request.vignette,
-    request.clarity, request.clarityRadius, request.shadows, request.highlights,
+    request.temperature, request.tint, request.wbR, request.wbG, request.wbB,
+    request.vignette, request.clarity, request.clarityRadius, request.sharpening,
+    request.sharpenRadius, request.denoise, request.vibrance, request.ca,
+    request.distortion, request.shadows, request.highlights,
     request.cy0, request.cy1, request.cy2, request.cy3, request.cy4,
-    request.quality || 1);
+    quality);
   var size = Module._dec_rendered_preview_size();
   if (!result || !size) {
     var errorFields = responseFields(request);
@@ -128,7 +131,7 @@ function handleProcess(request) {
   fields.bytes = bytes;
   fields.w = Module._dec_rendered_preview_width();
   fields.h = Module._dec_rendered_preview_height();
-  fields.quality = request.quality || 1;
+  fields.quality = quality;
   self.postMessage(fields, [bytes]);
 }
 
@@ -136,8 +139,10 @@ function handleExport(request) {
   var fields = responseFields(request);
   var result = Module._dec_export_write(
     request.exp, request.black, request.white, request.contrast, request.sat,
-    request.wbR, request.wbG, request.wbB, request.vignette,
-    request.clarity, request.clarityRadius, request.shadows, request.highlights,
+    request.temperature, request.tint, request.wbR, request.wbG, request.wbB,
+    request.vignette, request.clarity, request.clarityRadius, request.sharpening,
+    request.sharpenRadius, request.denoise, request.vibrance, request.ca,
+    request.distortion, request.shadows, request.highlights,
     request.cy0, request.cy1, request.cy2, request.cy3, request.cy4,
     request.fmt, request.quality);
   var size = Module._dec_export_size();
