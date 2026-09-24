@@ -903,10 +903,14 @@ static bool SliderFloatWithReset(const char* label, float* value, float minValue
                                  const char* format, float resetValue)
 {
     ImGui::PushID(label);
+    const float available = ImGui::GetContentRegionAvail().x;
+    const float labelWidth = ImGui::CalcTextSize(label).x;
     const float resetWidth = ImGui::CalcTextSize("Reset").x + ImGui::GetStyle().FramePadding.x * 2.0f;
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
-    ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x - resetWidth - spacing));
-    bool changed = ImGui::SliderFloat(label, value, minValue, maxValue, format);
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(std::max(40.0f, available - labelWidth - resetWidth - spacing * 2.0f));
+    bool changed = ImGui::SliderFloat("##value", value, minValue, maxValue, format);
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) || ImGui::IsItemActive())
         g_controlHovered = true;
     ImGui::SameLine();
@@ -924,10 +928,14 @@ static bool SliderIntWithReset(const char* label, int* value, int minValue, int 
                                const char* format, int resetValue)
 {
     ImGui::PushID(label);
+    const float available = ImGui::GetContentRegionAvail().x;
+    const float labelWidth = ImGui::CalcTextSize(label).x;
     const float resetWidth = ImGui::CalcTextSize("Reset").x + ImGui::GetStyle().FramePadding.x * 2.0f;
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
-    ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x - resetWidth - spacing));
-    bool changed = ImGui::SliderInt(label, value, minValue, maxValue, format);
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(std::max(40.0f, available - labelWidth - resetWidth - spacing * 2.0f));
+    bool changed = ImGui::SliderInt("##value", value, minValue, maxValue, format);
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) || ImGui::IsItemActive())
         g_controlHovered = true;
     ImGui::SameLine();
@@ -946,7 +954,6 @@ static void DrawToolbox()
     ImGui::Begin("Toolbox");
     g_controlHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
                                              ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
-    ImGui::TextUnformatted("Exposure");
     SliderFloatWithReset("Exposure", &g_dec->exposure, -5.0f, 5.0f, "%.2f EV", 0.0f);
     ImGui::TextUnformatted("Black / White points");
     SliderIntWithReset("Black", &g_dec->black, 0, 50, "%d", 0);
