@@ -373,9 +373,31 @@ inside a classic Web Worker** so the app is deployable to pure static hosting
 - Artifacts (fresh build): `wasmraw.html/js/wasm` + `decoder.js` (62 KB) +
   `decoder.wasm` (758 KB) + `decoder-worker.js`.
 
-Remaining upstream, out of scope for this milestone: glib/full `rtengine`
-processing pipeline (RawTherapee's color science beyond the LibRaw decode), file
-browser/batch queue, preferences.
+### Phase 2 editor-first slice (2026-09-24)
+
+The first Phase 2 implementation deliberately extends the current LibRaw and
+shared CPU pipeline instead of importing the full GTK-dependent `rtengine`.
+
+- **Per-image documents**: each catalog entry owns its edit state, history,
+  snapshots, thumbnail, decoded preview, and metadata. The browser catalog
+  retains `File` objects and queues one worker decode at a time.
+- **Versioned routing**: decode, preview, and export messages carry image and
+  request identity plus document revisions; stale responses are ignored.
+- **Editor UI**: filmstrip, history/snapshots, navigator overview, pixel readout,
+  undo/redo, zoom/navigation shortcuts, and keyboard image selection.
+- **Expanded tools**: temperature/tint, vibrance, sharpening, noise reduction,
+  chromatic aberration, and distortion correction share `app/tone_common.h` with
+  native-resolution export.
+- **Progressive rendering**: the worker sends a draft preview followed by a final
+  render; local-contrast and denoise work is disabled for drafts.
+- **Export selection**: native-resolution and preview-resolution PNG/JPEG export
+  are both supported.
+- **Validation**: `build.ps1 -Smoke` checks decode statistics, worker-side preview
+  rendering, and PNG/JPEG output signatures.
+
+Remaining Phase 2 follow-up: crop/rotate, stronger browser automation, full
+profile serialization, and optional separation of preview/export workers. Full
+`rtengine` integration remains a later compatibility track.
 
 ---
 

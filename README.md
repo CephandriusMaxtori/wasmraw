@@ -9,18 +9,24 @@ no server, no uploads, no account. Drop a RAW file in the browser and edit it.
 - **Decode**: real RAW files via LibRaw (unpack -> demosaic -> linear 16-bit),
   running in a **Web Worker** so the UI never blocks. Options, ISO, shutter,
   aperture, focal length, make/model reported.
-- **Live preview**: processed in CPU on a downscaled linear buffer; sliders update
-  in real time.
-- **Tools** (preview + full-res export share the exact same math):
+- **Multi-image workflow**: load several files from the picker or drag/drop,
+  browse them in a thumbnail filmstrip, and keep edits, history, and snapshots
+  per image. Decoding is queued through the worker.
+- **Live preview**: processed on a downscaled linear buffer; draft and final
+  quality generations are rendered in the worker, with stale results discarded.
+- **Tools** (preview + export share the same math):
   - Exposure, Black/White points, Contrast, Saturation
   - White balance: presets, per-channel gains, click-to-pick from the image
   - Tone curve (draggable 5-point editor)
   - Shadows / Highlights recovery
-  - Clarity (unsharp, luma-based) with radius
+  - Clarity, sharpening, and noise reduction
+  - Temperature, tint, vibrance
+  - Chromatic aberration and distortion correction
   - Vignetting correction (+ lighten / - darken)
   - Histogram window (luma + RGB)
-  - Preview pan / zoom (scroll, drag, double-click to fit)
-- **Export**: PNG or JPEG at **full native resolution**, encoded in the worker;
+  - Navigator overview, pixel readout, preview pan / zoom
+- **History**: per-image undo/redo and named snapshots, with keyboard shortcuts.
+- **Export**: PNG or JPEG at native or preview resolution, encoded in the worker;
   tone parameters are snapshotted from the current preview state.
 - **Persistent layout**: docked window arrangement is saved to `localStorage`.
 - **Two WebAssembly modules**: `wasmraw` (UI) + `decoder` (worker decoding/export) -
@@ -39,7 +45,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Smoke
 ```
 
 This builds both modules into `build-wasm/` and runs the headless smoke test
-(synthetic DNG decode + PNG/JPEG export assertions).
+(synthetic DNG decode, worker-side preview rendering, and PNG/JPEG export assertions).
 
 ## Run locally
 
@@ -82,11 +88,11 @@ it keeps working under a `/repo/` path; no base-tag or server config required.
 
 ```
 app/
-  shell.html        Browser shell: worker wiring, splash/progress, drag-drop
-  main.cpp          ImGui app (UI module wasmraw): tone tools, zoom, histogram
-  decoder.cpp       Worker module: LibRaw decode + full-res export
-  decoder-worker.js Worker glue + message protocol (importScripts decoder.js)
-  tone_common.h     Shared tone math - single source for preview AND export
+  shell.html        Browser shell: catalog, worker wiring, drag/drop, previews
+  main.cpp          ImGui app: documents, tools, history, navigator, filmstrip
+  decoder.cpp       Worker module: LibRaw decode, preview render, export
+  decoder-worker.js Worker glue + versioned message protocol
+  tone_common.h     Shared processing math for preview AND export
   third_party/      stb_image_write (PNG/JPEG encoder, worker-side)
 RawTherapee/        Vendored upstream source (rtengine/libraw used only)
 build.ps1           Build + smoke driver
@@ -98,6 +104,9 @@ smoke/              Headless smoke test (synthetic DNG etc.)
 
 - White balance is post-decode linear channel gain (standard simplified WB), not a
   camera-space re-demosaic.
-- Full-res export with Clarity is slower (24 MP gaussian) but stays off-thread.
-- No glib/GTK or full `rtengine` pipeline yet (that's the Phase 2 horizon, see
-  `RawTherapee-ImGui-WASM-Design.md`).
+- Detail, color, and lens tools are practical CPU approximations; the full
+  `rtengine` color pipeline and profile compatibility are deferred.
+- Crop/rotate, masks, batch processing, preferences, and project persistence are
+  not implemented yet.
+- Full-res export with local-contrast tools is slower but stays off the UI thread.
+- No glib/GTK or full `rtengine` pipeline is linked into the WASM build.
