@@ -126,6 +126,7 @@
       var dropEl = document.getElementById('drop');
       var runtimeReady = false;
       var decodeWorker = null;
+      var decoderReady = false;
       var decodeBusy = false;
       var activeImageId = 0;
       var activeWorkerImageId = 0;
@@ -194,16 +195,21 @@
         if (!record || record.decodeQueued) return;
         if (activeWorkerImageId === record.id && record.workerReady) return;
         record.decodeQueued = true;
-        record.status = 'Reading';
+        record.status = 'Queued';
+        updateRecordStatus(record.id, record.status);
         if (record.bytes) {
           pendingDecodes.push(record);
           pumpDecodeQueue();
           return;
         }
         if (!record.file) {
+          record.decodeQueued = false;
           record.status = 'Missing file';
+          updateRecordStatus(record.id, record.status);
           return;
         }
+        record.status = 'Reading';
+        updateRecordStatus(record.id, record.status);
         var reader = new FileReader();
         reader.onload = function (event) {
           if (!record.decodeQueued) return;
@@ -214,13 +220,14 @@
         reader.onerror = function () {
           record.decodeQueued = false;
           record.status = 'Read error';
+          updateRecordStatus(record.id, record.status);
           setStatus('Could not read ' + record.name, 'err');
         };
         reader.readAsArrayBuffer(record.file);
       }
 
       function pumpDecodeQueue() {
-        if (decodeBusy || !decodeWorker || !pendingDecodes.length) return;
+        if (decodeBusy || !decodeWorker || !decoderReady || !pendingDecodes.length) return;
         var index = 0;
         if (desiredImageId) {
           for (var i = 0; i < pendingDecodes.length; ++i) {
@@ -241,6 +248,7 @@
         for (var j = 0; j < imageCatalog.length; ++j)
           imageCatalog[j].workerReady = false;
         record.status = 'Decoding';
+        updateRecordStatus(record.id, record.status);
         record.requestId = nextRequestId++;
         var ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
         try {
@@ -259,7 +267,7 @@
         }
       }
 
-      function selectImage(id) {
+      function selectImage(id, decode) {
         var record = findRecord(id);
         if (!record) return;
         activeImageId = id;
@@ -270,7 +278,7 @@
           hideSplash();
           return;
         }
-        queueDecode(record);
+        if (decode !== false) queueDecode(record);
       }
 
       function addFiles(files) {
@@ -279,8 +287,10 @@
           var record = addRecord(files[i], null, files[i].name);
           if (record) added.push(record);
         }
-        if (added.length && !activeImageId) selectImage(added[0].id);
-        if (added.length > 1) setStatus(added.length + ' images added');
+        if (!added.length) return;
+        if (!activeImageId) selectImage(added[0].id, false);
+        for (var j = 0; j < added.length; ++j) queueDecode(added[j]);
+        if (added.length > 1) setStatus(added.length + ' images queued');
       }
 
       function loadBytes(bytes, name) {
@@ -305,6 +315,7 @@
         var message = event.data || {};
         switch (message.type) {
           case 'ready':
+            decoderReady = true;
             console.log('decoder: ready');
             pumpDecodeQueue();
             break;
@@ -547,6 +558,7 @@
             decodeWorker = new Worker('decoder-worker.js');
             decodeWorker.onmessage = onWorkerMessage;
             decodeWorker.onerror = function (event) {
+              decoderReady = false;
               setStatus('Decoder worker error: ' + (event.message || 'unknown'), 'err');
             };
             console.log('decoder: worker spawned');
