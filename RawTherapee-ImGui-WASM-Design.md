@@ -211,8 +211,6 @@ ImGui::Image() or custom draw list in preview pane
 - Persistent storage (OPFS) for projects.
 - Performance tuning and memory limits handling.
 
-### Phase 4 – Native Desktop Parity (optional)
-- Same codebase builds to native (GLFW/SDL + OpenGL/Vulkan) so the ImGui UI can eventually replace or coexist with the GTK UI on desktop.
 
 ---
 
