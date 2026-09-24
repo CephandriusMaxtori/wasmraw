@@ -969,8 +969,6 @@ static bool SliderIntWithReset(const char* label, int* value, int minValue, int 
 static void DrawToolbox()
 {
     ImGui::Begin("Toolbox");
-    g_controlHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
-                                             ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     SliderFloatWithReset("Exposure", &g_dec->exposure, -5.0f, 5.0f, "%.2f EV", 0.0f);
     ImGui::TextUnformatted("Black / White points");
     SliderIntWithReset("Black", &g_dec->black, 0, 50, "%d", 0);
@@ -1270,6 +1268,7 @@ static void RenderFrame(GLFWwindow* window)
     ApplyDisplayScale(); // layout in CSS px, framebuffer at devicePixelRatio
 #endif
     ImGui::NewFrame();
+    g_controlHovered = false;
     HandleShortcuts();
 
     if (g_previewDirty && g_dec->loaded) RebuildPreview();
@@ -1295,6 +1294,10 @@ static void RenderFrame(GLFWwindow* window)
     DrawToolbox();
     DrawHistogram();
     DrawStatus();
+    g_controlHovered = ImGui::IsAnyItemHovered() ||
+                       ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow |
+                                             ImGuiHoveredFlags_DockHierarchy |
+                                             ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
 
     ImGui::Render();
     int display_w = 0, display_h = 0;
