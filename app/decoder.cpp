@@ -37,6 +37,8 @@ static Decoded g_dec;
 
 static std::vector<unsigned char> g_exportBuf;
 static std::vector<unsigned char> g_renderedPreview;
+static std::vector<unsigned char> g_mask;
+static int g_maskDim = 0;
 static int g_renderedWidth = 0;
 static int g_renderedHeight = 0;
 static char g_exportStatus[160] = "";
@@ -322,6 +324,26 @@ int dec_h() { return g_dec.h; }
 EMSCRIPTEN_KEEPALIVE
 int dec_has_fullres() { return g_dec.hasFullRes ? 1 : 0; }
 
+// The subject mask travels with every render request so the worker's preview and
+// the export always agree with what the UI shows.
+EMSCRIPTEN_KEEPALIVE
+int dec_set_mask(const unsigned char* data, int size)
+{
+    g_mask.clear();
+    g_maskDim = 0;
+    if (!data || size <= 0) return 1;
+    const int dim = (int)std::lround(std::sqrt((double)size));
+    if (dim < 2 || dim * dim != size) return 0;
+    try {
+        g_mask.assign(data, data + size);
+    } catch (const std::bad_alloc&) {
+        g_mask.clear();
+        return 0;
+    }
+    g_maskDim = dim;
+    return 1;
+}
+
 EMSCRIPTEN_KEEPALIVE
 double dec_iso() { return g_dec.iso; }
 
@@ -396,6 +418,7 @@ int dec_render_preview(double exposure, double black, double white, double contr
     p.blurFocusX = (float)blurFocusX;
     p.blurFocusY = (float)blurFocusY;
     p.blurRange = (float)blurRange;
+    if (g_maskDim > 1) { p.mask = g_mask.data(); p.maskSize = g_maskDim; }
     try {
         tone::ToneMapToBuffer(g_dec.previewRgb, g_dec.pw, g_dec.ph, p, g_renderedPreview);
     } catch (const std::bad_alloc&) {
@@ -510,6 +533,7 @@ int dec_export_write(double exposure, double black, double white, double contras
     p.blurFocusX = (float)blurFocusX;
     p.blurFocusY = (float)blurFocusY;
     p.blurRange = (float)blurRange;
+    if (g_maskDim > 1) { p.mask = g_mask.data(); p.maskSize = g_maskDim; }
     tone::GetOutputSize(outputWidth, outputHeight, p, outputWidth, outputHeight);
 
     std::vector<unsigned char> rgba8;

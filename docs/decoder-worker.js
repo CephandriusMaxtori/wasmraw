@@ -129,7 +129,26 @@ function handleDecode(request) {
   }
 }
 
+function applyMask(request) {
+  if (!Module._dec_set_mask) return;
+  if (!request.mask || !request.mask.byteLength) {
+    Module._dec_set_mask(0, 0);
+    return;
+  }
+  var bytes = new Uint8Array(request.mask);
+  var ptr = Module._malloc(bytes.length);
+  try {
+    Module.writeArrayToMemory(bytes, ptr);
+    if (!Module._dec_set_mask(ptr, bytes.length)) {
+      console.error('[decoder] rejected subject mask of', bytes.length, 'bytes');
+    }
+  } finally {
+    Module._free(ptr);
+  }
+}
+
 function handleProcess(request) {
+  applyMask(request);
   var quality = request.quality === undefined ? 1 : request.quality;
   var result = Module._dec_render_preview(
     request.exp, request.black, request.white, request.contrast, request.sat,
@@ -161,6 +180,7 @@ function handleProcess(request) {
 }
 
 function handleExport(request) {
+  applyMask(request);
   var fields = responseFields(request);
   var result = Module._dec_export_write(
     request.exp, request.black, request.white, request.contrast, request.sat,

@@ -35,6 +35,7 @@ extern "C" int dec_export_write(double exposure, double black, double white,
 extern "C" size_t dec_export_size();
 extern "C" const unsigned char* dec_export_data();
 extern "C" int dec_has_fullres();
+extern "C" int dec_set_mask(const unsigned char* data, int size);
 
 static const char* kPngMagic = "\x89PNG\r\n\x1a\n";
 
@@ -170,6 +171,63 @@ int main(int argc, char** argv)
         }
         printf("PREVIEW-BLUR ok=%d size=%u\n", blurOk ? 1 : 0, (unsigned)blurSize);
         if (!blurOk) r = 1;
+
+        // Subject mask: paint the left half as protected, then check that the
+        // right half blurs while the protected side stays sharp.
+        const int maskDim = 32;
+        std::vector<unsigned char> mask((size_t)maskDim * maskDim, 0);
+        for (int y = 0; y < maskDim; ++y)
+            for (int x = 0; x < maskDim / 2; ++x)
+                mask[(size_t)y * maskDim + x] = 255;
+        int maskAccepted = dec_set_mask(mask.data(), (int)mask.size());
+        int masked = dec_render_preview(0.0, 0.0, 1.0, 0.0, 1.0,
+                                        0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
+                                        0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
+                                        0.0, 0.0, 0.0, 0.0,
+                                        0.0, 0.25, 0.5, 0.75, 1.0,
+                                        0.0, 0.0, 1.0, 1.0, 0, 1, 0, 0.5, 0.5, 0.35);
+        size_t maskSize = dec_rendered_preview_size();
+        const unsigned char* maskedPtr = dec_rendered_preview_ptr();
+        bool maskOk = maskAccepted && masked && maskSize == blurSize && maskedPtr;
+        int maskProtectedDelta = 0;
+        int maskBlurredDelta = 0;
+        if (maskOk) {
+            std::vector<unsigned char> unmasked(maskSize);
+            dec_set_mask(0, 0);
+            dec_render_preview(0.0, 0.0, 1.0, 0.0, 1.0,
+                               0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
+                               0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.25, 0.5, 0.75, 1.0,
+                               0.0, 0.0, 1.0, 1.0, 0, 1, 1.0, 0.5, 0.5, 0.35);
+            memcpy(unmasked.data(), dec_rendered_preview_ptr(), maskSize);
+            dec_set_mask(mask.data(), (int)mask.size());
+            dec_render_preview(0.0, 0.0, 1.0, 0.0, 1.0,
+                               0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
+                               0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
+                               0.0, 0.0, 0.0, 0.0,
+                               0.0, 0.25, 0.5, 0.75, 1.0,
+                               0.0, 0.0, 1.0, 1.0, 0, 1, 1.0, 0.5, 0.5, 0.35);
+            const unsigned char* maskedAgain = dec_rendered_preview_ptr();
+            // Compare whole halves rather than a few pixels: on a small smooth
+            // test image single samples can land where the blur is a no-op.
+            for (int y = 0; y < ph; ++y) {
+                for (int x = 0; x < pw; ++x) {
+                    const size_t index = ((size_t)y * pw + x) * 4;
+                    for (int c = 0; c < 3; ++c) {
+                        const int delta = abs((int)maskedAgain[index + c] - (int)unmasked[index + c]);
+                        if (x < pw / 2) maskProtectedDelta += delta;
+                        else maskBlurredDelta += delta;
+                    }
+                }
+            }
+            maskOk = maskBlurredDelta > maskProtectedDelta;
+            dec_set_mask(0, 0);
+        }
+        printf("PREVIEW-MASK ok=%d accepted=%d rendered=%d maskSize=%u baseSize=%u protectedDelta=%d blurredDelta=%d\n",
+               maskOk ? 1 : 0, maskAccepted, masked, (unsigned)maskSize, (unsigned)blurSize,
+               maskProtectedDelta, maskBlurredDelta);
+        if (!maskOk) r = 1;
 
         int okPng = dec_export_write(0.0, 0.0, 1.0, 0.0, 1.0,
                                      0.0, 0.0, 1.0, 1.0, 1.0, 0.25,

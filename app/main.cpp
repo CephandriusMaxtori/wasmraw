@@ -1,6 +1,7 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+#include "third_party/space_grotesk_data.h"
 #include "tone_common.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -83,6 +84,14 @@ struct ImageDocument : EditState {
     float beforeCropRight = -1.0f;
     float beforeCropBottom = -1.0f;
     int beforeRotate = -1;
+    // Painted subject-protection mask, normalized to the output image.
+    std::vector<unsigned char> mask;
+    GLuint maskTexture = 0;
+    int maskRevision = 0;
+    int maskTextureRevision = -1;
+    bool maskEnabled = false;
+    int brushSize = 40;
+    bool brushErase = false;
     std::vector<unsigned char> thumbnail;
     GLuint thumbnailTexture = 0;
     int thumbnailWidth = 0;
@@ -107,6 +116,8 @@ static ImageDocument g_empty;
 static ImageDocument* g_dec = &g_empty;
 static bool g_wbPicking = false;
 static bool g_dofPicking = false;
+static bool g_maskPainting = false;
+static const int kMaskGrid = 256;
 static bool g_skipHistory = false;
 static bool g_controlHovered = false;
 static bool g_showPreview = true;
@@ -152,6 +163,8 @@ static bool EditStateEqual(const EditState& a, const EditState& b)
 static void RequestPreview();
 static void ToneMapPreview();
 static void MarkToneDirty();
+static void MarkMaskDirty(ImageDocument* doc);
+static void PaintMask(ImageDocument* doc, float u, float v, float radius, bool erase);
 static void BuildBeforePreview(ImageDocument* doc);
 static bool BeforeNeedsRebuild(const ImageDocument* doc);
 
@@ -368,6 +381,13 @@ static tone::Params CurrentToneParams()
     p.blurFocusX = g_dec->blurFocusX;
     p.blurFocusY = g_dec->blurFocusY;
     p.blurRange = g_dec->blurRange;
+    if (g_dec->maskEnabled && !g_dec->mask.empty()) {
+        p.mask = g_dec->mask.data();
+        p.maskSize = kMaskGrid;
+    } else {
+        p.mask = nullptr;
+        p.maskSize = 0;
+    }
     return p;
 }
 
@@ -492,13 +512,14 @@ EM_JS(void, js_request_preview, (int imageId, int revision,
                                   double cropLeft, double cropTop, double cropRight, double cropBottom,
                                   int rotate, int quality,
                                   double blurAmount, double blurFocusX, double blurFocusY,
-                                  double blurRange), {
+                                  double blurRange,
+                                  const unsigned char* mask, int maskSize), {
     if (!window._wasmraw || !window._wasmraw.requestPreview) return;
     window._wasmraw.requestPreview(imageId, revision, exp, black, white, contrast, sat,
         temperature, tint, wbR, wbG, wbB, vignette, clarity, clarityRadius,
         sharpening, sharpenRadius, denoise, vibrance, ca, distortion, shadows, highlights,
         cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom, rotate, quality,
-        blurAmount, blurFocusX, blurFocusY, blurRange);
+        blurAmount, blurFocusX, blurFocusY, blurRange, mask, maskSize);
 });
 #endif
 
@@ -530,7 +551,9 @@ static void RequestPreview()
                        g_dec->cropLeft, g_dec->cropTop, g_dec->cropRight, g_dec->cropBottom,
                        g_dec->rotate, 0,
                        (double)g_dec->blurAmount / 100.0,
-                       g_dec->blurFocusX, g_dec->blurFocusY, g_dec->blurRange);
+                       g_dec->blurFocusX, g_dec->blurFocusY, g_dec->blurRange,
+                       (g_dec->maskEnabled && !g_dec->mask.empty()) ? g_dec->mask.data() : nullptr,
+                       g_dec->maskEnabled ? (int)g_dec->mask.size() : 0);
 #else
     g_previewDirty = true;
 #endif
@@ -583,6 +606,93 @@ void wasm_set_image_status(int imageId, const char* text)
 
 EMSCRIPTEN_KEEPALIVE
 int wasm_control_hovered() { return g_controlHovered ? 1 : 0; }
+
+// ---------- UI font ----------
+// The atlas holds two sizes of the same typeface: one for panels and controls,
+// one for the menu bar. Rebuilding it mid-frame is illegal, so a change only
+// flags the work and RenderFrame applies it before the next NewFrame.
+static std::vector<unsigned char> g_fontData;
+static std::string g_fontName = "Default";
+static float g_fontSize = 15.0f;
+static float g_menuFontSize = 16.0f;
+static bool g_fontDirty = true;
+static ImFont* g_uiFont = nullptr;
+static ImFont* g_menuFont = nullptr;
+
+// Space Grotesk backs the menu bar. It is bundled as a byte array so the build
+// stays self-contained; see assets/fonts/OFL.txt for the licence.
+static_assert(sizeof(kSpaceGrotesk) == kSpaceGroteskSize,
+              "embedded font data does not match its declared size");
+
+static ImFont* AddBundledFont(ImFontAtlas* atlas, float pixelSize)
+{
+    ImFontConfig config;
+    config.FontDataOwnedByAtlas = false;
+    config.OversampleH = 1;
+    config.OversampleV = 1;
+    return atlas->AddFontFromMemoryTTF((void*)kSpaceGrotesk, (int)kSpaceGroteskSize,
+                                       pixelSize, &config);
+}
+
+static void ApplyFontAtlas()
+{
+    ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+    atlas->ClearFonts();
+    g_uiFont = nullptr;
+    g_menuFont = nullptr;
+
+    if (!g_fontData.empty()) {
+        ImFontConfig config;
+        config.FontDataOwnedByAtlas = false;
+        config.OversampleH = 1;
+        config.OversampleV = 1;
+        g_uiFont = atlas->AddFontFromMemoryTTF(g_fontData.data(), (int)g_fontData.size(),
+                                                g_fontSize, &config);
+    } else {
+        ImFontConfig uiConfig;
+        uiConfig.SizePixels = g_fontSize;
+        g_uiFont = atlas->AddFontDefault(&uiConfig);
+    }
+    g_menuFont = AddBundledFont(atlas, g_menuFontSize);
+    g_fontDirty = false;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int wasm_load_font(const unsigned char* data, int size)
+{
+    if (!data || size <= 0) return 0;
+    try {
+        g_fontData.assign(data, data + size);
+    } catch (const std::bad_alloc&) {
+        g_fontData.clear();
+        return 0;
+    }
+    g_fontDirty = true;
+    return 1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_font_name(const char* name)
+{
+    g_fontName = name && name[0] ? name : "Custom";
+}
+
+EMSCRIPTEN_KEEPALIVE
+int wasm_reset_font()
+{
+    g_fontData.clear();
+    g_fontName = "Default";
+    g_fontDirty = true;
+    return 1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_font_sizes(float ui, float menu)
+{
+    g_fontSize = std::clamp(ui, 8.0f, 48.0f);
+    g_menuFontSize = std::clamp(menu, 8.0f, 48.0f);
+    g_fontDirty = true;
+}
 
 EMSCRIPTEN_KEEPALIVE
 void wasm_accept_decode(int imageId, const float* preview, int w, int h, int pw, int ph,
@@ -786,13 +896,14 @@ EM_JS(void, js_request_export, (int imageId, int revision, int fmt, int fullRes,
                                 double cropLeft, double cropTop, double cropRight, double cropBottom,
                                 int rotate, double quality,
                                 double blurAmount, double blurFocusX, double blurFocusY,
-                                double blurRange), {
+                                double blurRange,
+                                const unsigned char* mask, int maskSize), {
     if (!window._wasmraw || !window._wasmraw.requestExport) return;
     window._wasmraw.requestExport(imageId, revision, fmt, fullRes, exp, black, white,
         contrast, sat, temperature, tint, wbR, wbG, wbB, vignette, clarity, clarityRadius,
         sharpening, sharpenRadius, denoise, vibrance, ca, distortion, shadows, highlights,
         cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom, rotate,
-        Math.floor(quality), blurAmount, blurFocusX, blurFocusY, blurRange);
+        Math.floor(quality), blurAmount, blurFocusX, blurFocusY, blurRange, mask, maskSize);
 });
 
 EM_JS(void, js_select_image, (int imageId), {
@@ -809,6 +920,14 @@ EM_JS(void, js_load_profile, (), {
 
 EM_JS(void, js_open_file_dialog, (), {
     if (window._wasmraw && window._wasmraw.openFileDialog) window._wasmraw.openFileDialog();
+});
+
+EM_JS(void, js_open_font_dialog, (), {
+    if (window._wasmraw && window._wasmraw.openFontDialog) window._wasmraw.openFontDialog();
+});
+
+EM_JS(void, js_forget_font, (), {
+    if (window._wasmraw && window._wasmraw.forgetFont) window._wasmraw.forgetFont();
 });
 #endif
 
@@ -842,7 +961,9 @@ static void RequestExport(int format)
                       g_dec->cropLeft, g_dec->cropTop, g_dec->cropRight, g_dec->cropBottom,
                       g_dec->rotate, g_dec->jpegQuality,
                       (double)g_dec->blurAmount / 100.0,
-                      g_dec->blurFocusX, g_dec->blurFocusY, g_dec->blurRange);
+                      g_dec->blurFocusX, g_dec->blurFocusY, g_dec->blurRange,
+                      (g_dec->maskEnabled && !g_dec->mask.empty()) ? g_dec->mask.data() : nullptr,
+                      g_dec->maskEnabled ? (int)g_dec->mask.size() : 0);
 #else
     (void)format;
 #endif
@@ -1365,6 +1486,58 @@ static void DrawToolbox()
         ImGui::TextDisabled("Focus at %.2f, %.2f", g_dec->blurFocusX, g_dec->blurFocusY);
     ImGui::TextDisabled("Distance from the focus point drives the blur");
 
+    ImGui::Separator();
+    ImGui::TextUnformatted("Subject mask");
+    if (ImGui::Checkbox("Blur outside painted area", &g_dec->maskEnabled)) {
+        if (g_dec->maskEnabled && g_dec->blurAmount == 0) g_dec->blurAmount = 50;
+        g_previewDirty = true;
+    }
+    if (g_dec->maskEnabled) {
+        if (ImGui::Checkbox("Paint subject (click image)", &g_maskPainting) && g_maskPainting) {
+            g_wbPicking = false;
+            g_dofPicking = false;
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("Erase", &g_dec->brushErase);
+        ImGui::SliderInt("Brush size", &g_dec->brushSize, 2, 150, "%d");
+        if (ImGui::Button("Clear mask")) {
+            g_dec->mask.clear();
+            MarkMaskDirty(g_dec);
+        }
+        ImGui::TextDisabled("Paint over the subject; everything else is blurred");
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Interface font");
+    float uiSize = g_fontSize;
+    if (ImGui::SliderFloat("Panel text size", &uiSize, 10.0f, 24.0f, "%.0f px") &&
+        uiSize != g_fontSize) {
+        g_fontSize = uiSize;
+        g_fontDirty = true;
+    }
+    float menuSize = g_menuFontSize;
+    if (ImGui::SliderFloat("Menu text size", &menuSize, 10.0f, 28.0f, "%.0f px") &&
+        menuSize != g_menuFontSize) {
+        g_menuFontSize = menuSize;
+        g_fontDirty = true;
+    }
+    if (ImGui::Button("Load font...")) {
+#ifdef __EMSCRIPTEN__
+        js_open_font_dialog();
+#endif
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset to default")) {
+        g_fontData.clear();
+        g_fontName = "Default";
+        g_fontSize = 15.0f;
+        g_fontDirty = true;
+#ifdef __EMSCRIPTEN__
+        js_forget_font();
+#endif
+    }
+    ImGui::TextDisabled("Panels: %s | Menus: Space Grotesk", g_fontName.c_str());
+
     bool hasImage = g_dec->loaded && g_dec->pw > 0;
     ImGui::Separator();
     ImGui::TextUnformatted("Export");
@@ -1514,6 +1687,19 @@ static void DrawPreview()
         }
     }
 
+    // Subject-mask painting. The mask is stored in output-normalized space, so
+    // it lines up with what is on screen and survives a resolution change.
+    if (g_maskPainting && g_dec->maskEnabled && g_dec->loaded && hovered) {
+        const float u = (mouse.x - tlx) / iw, v = (mouse.y - tly) / ih;
+        const bool inside = u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f;
+        if (inside && (ImGui::IsMouseClicked(0) || ImGui::IsMouseDown(0))) {
+            PaintMask(g_dec, u, v, (float)g_dec->brushSize / (float)std::max(g_texW, g_texH),
+                      g_dec->brushErase);
+            MarkMaskDirty(g_dec);
+        }
+        if (inside && ImGui::IsMouseClicked(0)) g_wbPicking = false;
+    }
+
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), IM_COL32(20, 20, 24, 255));
     const bool split = g_beforeAfter && g_dec->beforeTexture != 0 &&
@@ -1538,6 +1724,37 @@ static void DrawPreview()
         const float fy = tly + g_dec->blurFocusY * ih;
         dl->AddCircle(ImVec2(fx, fy), 7.0f, IM_COL32(255, 255, 255, 210), 0, 1.0f);
         dl->AddCircleFilled(ImVec2(fx, fy), 2.5f, IM_COL32(255, 220, 80, 240));
+    }
+    if (g_dec->maskEnabled && !g_dec->mask.empty()) {
+        if (g_dec->maskTextureRevision != g_dec->maskRevision) {
+            std::vector<unsigned char> overlay((size_t)kMaskGrid * kMaskGrid * 4);
+            for (size_t i = 0; i < (size_t)kMaskGrid * kMaskGrid; ++i) {
+                const unsigned char keep = g_dec->mask[i];
+                const bool blurred = keep < 128;
+                overlay[i * 4 + 0] = blurred ? (unsigned char)220 : (unsigned char)40;
+                overlay[i * 4 + 1] = blurred ? (unsigned char)60 : (unsigned char)210;
+                overlay[i * 4 + 2] = blurred ? (unsigned char)60 : (unsigned char)160;
+                overlay[i * 4 + 3] = (unsigned char)(blurred ? 70 : 60);
+            }
+            if (!g_dec->maskTexture) glGenTextures(1, &g_dec->maskTexture);
+            glBindTexture(GL_TEXTURE_2D, g_dec->maskTexture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kMaskGrid, kMaskGrid, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, overlay.data());
+            g_dec->maskTextureRevision = g_dec->maskRevision;
+        }
+        dl->AddImage((ImTextureID)(intptr_t)g_dec->maskTexture,
+                     ImVec2(tlx, tly), ImVec2(tlx + iw, tly + ih));
+        if (g_maskPainting) {
+            const float u = std::clamp((mouse.x - tlx) / iw, 0.0f, 1.0f);
+            const float v = std::clamp((mouse.y - tly) / ih, 0.0f, 1.0f);
+            const float brush = (float)g_dec->brushSize / (float)std::max(g_texW, g_texH);
+            dl->AddCircle(ImVec2(tlx + u * iw, tly + v * ih), std::max(2.0f, brush * iw),
+                          IM_COL32(255, 255, 255, 200), 0, 1.5f);
+        }
     }
 
     char zbuf[48];
@@ -1626,6 +1843,7 @@ static void HandleShortcuts()
 static void DrawMainMenuBar()
 {
     if (!ImGui::BeginMainMenuBar()) return;
+    if (g_menuFont) ImGui::PushFont(g_menuFont);
 
     if (ImGui::BeginMenu("File")) {
         if (ImGui::MenuItem("Import Image(s)...")) {
@@ -1633,6 +1851,26 @@ static void DrawMainMenuBar()
             js_open_file_dialog();
 #else
             g_showStatus = true;
+#endif
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Export PNG")) {
+            g_showToolbox = true;
+            RequestExport(0);
+        }
+        if (ImGui::MenuItem("Export JPEG")) {
+            g_showToolbox = true;
+            RequestExport(1);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Save profile...")) {
+#ifdef __EMSCRIPTEN__
+            js_save_profile();
+#endif
+        }
+        if (ImGui::MenuItem("Load profile...")) {
+#ifdef __EMSCRIPTEN__
+            js_load_profile();
 #endif
         }
         ImGui::Separator();
@@ -1679,6 +1917,7 @@ static void DrawMainMenuBar()
     }
 
     ImGui::EndMainMenuBar();
+    if (g_menuFont) ImGui::PopFont();
 }
 
 static void RenderFrame(GLFWwindow* window)
@@ -1689,9 +1928,10 @@ static void RenderFrame(GLFWwindow* window)
 #ifdef __EMSCRIPTEN__
     ApplyDisplayScale(); // layout in CSS px, framebuffer at devicePixelRatio
 #endif
+    // The font atlas may only be rebuilt between frames.
+    if (g_fontDirty) ApplyFontAtlas();
     ImGui::NewFrame();
-    g_controlHovered = false;
-    HandleShortcuts();
+    g_controlHovered = false;    HandleShortcuts();
 
     if (g_previewDirty && g_dec->loaded) RebuildPreview();
 
@@ -1743,6 +1983,53 @@ static void MarkToneDirty()
         g_histDirty = true;
     }
 #endif
+}
+
+// The mask is pixel data rather than a slider value, so it is deliberately kept
+// out of the undo history and the profile: those describe look, not per-image
+// geometry of a specific photo.
+static void MarkMaskDirty(ImageDocument* doc)
+{
+    if (!doc) return;
+    doc->maskRevision++;
+    g_previewDirty = true;
+    if (doc->id > 0) doc->revision++;
+#ifdef __EMSCRIPTEN__
+    if (doc->loaded) {
+        ToneMapPreview();
+        g_histDirty = true;
+    }
+#endif
+}
+
+static void PaintMask(ImageDocument* doc, float u, float v, float radius, bool erase)
+{
+    if (!doc) return;
+    if (doc->mask.empty()) doc->mask.assign((size_t)kMaskGrid * kMaskGrid, 0);
+    const float cx = std::clamp(u, 0.0f, 1.0f) * (float)(kMaskGrid - 1);
+    const float cy = std::clamp(v, 0.0f, 1.0f) * (float)(kMaskGrid - 1);
+    const float r = std::max(1.0f, radius * (float)(kMaskGrid - 1));
+    const int x0 = std::max(0, (int)std::floor(cx - r));
+    const int x1 = std::min(kMaskGrid - 1, (int)std::ceil(cx + r));
+    const int y0 = std::max(0, (int)std::floor(cy - r));
+    const int y1 = std::min(kMaskGrid - 1, (int)std::ceil(cy + r));
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            const float dx = (float)x - cx;
+            const float dy = (float)y - cy;
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            if (distance > r) continue;
+            // Soft edge so the blur transition is not a visible hard line.
+            const float falloff = 1.0f - std::clamp(distance / r, 0.0f, 1.0f);
+            const float weight = falloff * falloff * (3.0f - 2.0f * falloff);
+            const unsigned char target = (unsigned char)(weight * 255.0f);
+            unsigned char& cell = doc->mask[(size_t)y * kMaskGrid + x];
+            if (erase)
+                cell = (unsigned char)std::min((int)cell, 255 - (int)target);
+            else
+                cell = (unsigned char)std::max((int)cell, (int)target);
+        }
+    }
 }
 
 #if !defined(WASMRAW_SMOKE_TEST)

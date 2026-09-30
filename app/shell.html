@@ -101,7 +101,7 @@
         pointer-events: none;
       }
       #drop.on { display: block; }
-      #fileInput, #profileInput { display: none; }
+      #fileInput, #profileInput, #fontInput { display: none; }
     </style>
   </head>
   <body>
@@ -117,6 +117,7 @@
     <div id="drop">Drop RAW files</div>
     <input type="file" id="fileInput" multiple accept=".raw,.RAW,.cr2,.cr3,.nef,.arw,.dng,.orf,.rw2,.pef,.srw,.raf,.raw,image/*">
     <input type="file" id="profileInput" accept=".json,.rtprofile,application/json">
+    <input type="file" id="fontInput" accept=".ttf,.otf,.ttc,font/ttf,font/otf">
 
     <script type='text/javascript'>
       var splashEl = document.getElementById('splash');
@@ -125,6 +126,7 @@
       var canvasElement = document.getElementById('canvas');
       var inputElement = document.getElementById('fileInput');
       var profileInput = document.getElementById('profileInput');
+var fontInput = document.getElementById('fontInput');
       var dropEl = document.getElementById('drop');
       var runtimeReady = false;
       var decodeWorker = null;
@@ -437,12 +439,20 @@
         link.remove();
       }
 
+      // The subject mask lives in the WASM heap; copy it out so it can be
+      // transferred to the worker without keeping a view on that memory.
+      function copyMask(maskPtr, maskSize) {
+        if (!maskPtr || !maskSize) return null;
+        return new Uint8Array(Module.HEAPU8.buffer, maskPtr, maskSize).slice().buffer;
+      }
+
       function requestPreview(imageId, revision, exp, black, white, contrast, sat,
                               temperature, tint, wbR, wbG, wbB, vignette,
                               clarity, clarityRadius, sharpening, sharpenRadius,
                               denoise, vibrance, ca, distortion, shadows, highlights,
                               cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom,
-                              rotate, quality, blurAmount, blurFocusX, blurFocusY, blurRange) {
+                              rotate, quality, blurAmount, blurFocusX, blurFocusY, blurRange,
+                             maskPtr, maskSize) {
         var record = findRecord(imageId);
         if (!record || !decodeWorker) return;
         record.revision = revision;
@@ -462,7 +472,8 @@
           blurAmount: blurAmount || 0,
           blurFocusX: blurFocusX === undefined ? 0.5 : blurFocusX,
           blurFocusY: blurFocusY === undefined ? 0.5 : blurFocusY,
-          blurRange: blurRange === undefined ? 0.35 : blurRange
+          blurRange: blurRange === undefined ? 0.35 : blurRange,
+          mask: copyMask(maskPtr, maskSize)
         };
         record.lastPreview = pendingPreview;
         record.previewRequestId = pendingPreview.requestId;
@@ -481,7 +492,8 @@
                              clarity, clarityRadius, sharpening, sharpenRadius,
                              denoise, vibrance, ca, distortion, shadows, highlights,
                              cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom,
-                             rotate, quality, blurAmount, blurFocusX, blurFocusY, blurRange) {
+                             rotate, quality, blurAmount, blurFocusX, blurFocusY, blurRange,
+                             maskPtr, maskSize) {
         if (!decodeWorker) return;
         if (activeWorkerImageId !== imageId) {
           updateRecordStatus(imageId, 'Select image before exporting');
@@ -502,7 +514,8 @@
           blurAmount: blurAmount || 0,
           blurFocusX: blurFocusX === undefined ? 0.5 : blurFocusX,
           blurFocusY: blurFocusY === undefined ? 0.5 : blurFocusY,
-          blurRange: blurRange === undefined ? 0.35 : blurRange
+          blurRange: blurRange === undefined ? 0.35 : blurRange,
+          mask: copyMask(maskPtr, maskSize)
         });
       }
 
@@ -556,6 +569,60 @@
       }
 
         function openFileDialog() { inputElement.click(); }
+      function openFontDialog() { fontInput.click(); }
+      function forgetFont() {
+        try { localStorage.removeItem('wasmraw.fontData'); } catch (e) {}
+      }
+
+      // A font face is a few hundred KB at most, so keeping it in localStorage
+      // means the choice survives a reload instead of prompting again.
+      var FONT_STORAGE_LIMIT = 1500000;
+
+      function applyFontBytes(bytes, name) {
+        if (!Module._wasm_load_font) return;
+        var ptr = Module._malloc(bytes.length);
+        try {
+          Module.writeArrayToMemory(bytes, ptr);
+          if (!Module._wasm_load_font(ptr, bytes.length)) {
+            setStatus('That font could not be loaded', 'err');
+            return;
+          }
+          var namePtr = strToPtr(name || 'Custom');
+          try { Module._wasm_set_font_name(namePtr); } finally { Module._free(namePtr); }
+        } finally {
+          Module._free(ptr);
+        }
+        setStatus('Font loaded: ' + (name || 'Custom'));
+      }
+
+      function bytesToBase64(bytes) {
+        var binary = '';
+        var chunk = 0x8000;
+        for (var i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+        }
+        return btoa(binary);
+      }
+
+      function base64ToBytes(text) {
+        var binary = atob(text);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+      }
+
+      function restoreFont() {
+        var stored;
+        try { stored = localStorage.getItem('wasmraw.fontData'); } catch (e) { return; }
+        if (!stored) return;
+        try {
+          var parsed = JSON.parse(stored);
+          if (!parsed || !parsed.data) throw new Error('no data');
+          applyFontBytes(base64ToBytes(parsed.data), parsed.name);
+        } catch (e) {
+          forgetFont();
+        }
+      }
 
       // Matches the build id stamped into the page by the build, so the worker
       // and its decoder module are refetched whenever the UI module changes.
@@ -572,7 +639,9 @@
           requestExport: requestExport,
           saveProfile: saveProfile,
           loadProfile: loadProfile,
-          openFileDialog: openFileDialog
+          openFileDialog: openFileDialog,
+          openFontDialog: openFontDialog,
+          forgetFont: forgetFont
         };
 
       canvasElement.addEventListener('webglcontextlost', function (event) {
@@ -626,10 +695,32 @@
         if (inputElement.files && inputElement.files.length) addFiles(inputElement.files);
         inputElement.value = '';
       });
-      profileInput.addEventListener('change', function () {
-        var file = profileInput.files && profileInput.files[0];
-        profileInput.value = '';
-        if (!file) return;
+        fontInput.addEventListener('change', function () {
+          var file = fontInput.files && fontInput.files[0];
+          fontInput.value = '';
+          if (!file) return;
+          var reader = new FileReader();
+          reader.onload = function (event) {
+            var bytes = new Uint8Array(event.target.result);
+            applyFontBytes(bytes, file.name);
+            var encoded = bytesToBase64(bytes);
+            if (encoded.length <= FONT_STORAGE_LIMIT) {
+              try {
+                localStorage.setItem('wasmraw.fontData',
+                  JSON.stringify({ name: file.name, data: encoded }));
+              } catch (e) {
+                setStatus('Font loaded, but it could not be saved for next time', 'err');
+              }
+            }
+          };
+          reader.onerror = function () { setStatus('Could not read that font', 'err'); };
+          reader.readAsArrayBuffer(file);
+        });
+
+        profileInput.addEventListener('change', function () {
+          var file = profileInput.files && profileInput.files[0];
+          profileInput.value = '';
+          if (!file) return;
         var reader = new FileReader();
         reader.onload = function (event) { applyProfileText(String(event.target.result)); };
         reader.onerror = function () { setStatus('Could not read profile', 'err'); };
@@ -648,6 +739,7 @@
           fitCanvas();
           console.log('wasmraw: runtime initialized');
           setStatus('Ready - drop RAW files, double-click, or press Ctrl+O');
+          restoreFont();
           try {
             if (typeof Worker === 'undefined') throw new Error('Worker API unavailable');
             decodeWorker = new Worker('decoder-worker.js?build=' + encodeURIComponent(buildId()));

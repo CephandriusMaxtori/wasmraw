@@ -42,6 +42,10 @@ struct Params {
     float blurFocusX = 0.5f;
     float blurFocusY = 0.5f;
     float blurRange = 0.35f;
+    // Optional subject-protection mask: a size x size grid in output-normalized
+    // space where 255 keeps the pixel sharp and 0 lets the blur through.
+    const unsigned char* mask = nullptr;
+    int maskSize = 0;
 };
 
 static inline void GetCropBounds(int w, int h, const Params& p,
@@ -182,6 +186,21 @@ static inline float BlurFalloff(int ox, int oy, int outW, int outH, const Params
     return t * t * (3.f - 2.f * t);
 }
 
+static inline float SampleMask(const unsigned char* mask, int size, float u, float v)
+{
+    if (!mask || size < 2) return 1.0f;
+    const float x = std::clamp(u, 0.f, 1.f) * (float)(size - 1);
+    const float y = std::clamp(v, 0.f, 1.f) * (float)(size - 1);
+    const int x0 = (int)x, y0 = (int)y;
+    const int x1 = std::min(x0 + 1, size - 1), y1 = std::min(y0 + 1, size - 1);
+    const float fx = x - (float)x0, fy = y - (float)y0;
+    const float a = mask[(size_t)y0 * size + x0] / 255.0f;
+    const float b = mask[(size_t)y0 * size + x1] / 255.0f;
+    const float c = mask[(size_t)y1 * size + x0] / 255.0f;
+    const float d = mask[(size_t)y1 * size + x1] / 255.0f;
+    return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+}
+
 static inline void CompositeDepthOfField(const std::vector<float>& work, int outW, int outH,
                                          const Params& p, std::vector<unsigned char>& rgba8)
 {
@@ -196,21 +215,29 @@ static inline void CompositeDepthOfField(const std::vector<float>& work, int out
     for (int oy = 0; oy < outH; ++oy) {
         for (int ox = 0; ox < outW; ++ox) {
             const size_t index = ((size_t)oy * outW + ox) * 3;
-            const float amount8 = BlurFalloff(ox, oy, outW, outH, p) * amount;
+            const float u = ((float)ox + 0.5f) / (float)outW;
+            const float v = ((float)oy + 0.5f) / (float)outH;
+            float amount8 = BlurFalloff(ox, oy, outW, outH, p) * amount;
+            if (p.mask) {
+                // Subject mask wins wherever it protects, so a painted subject
+                // stays sharp no matter how far it sits from the focus point.
+                const float keep = SampleMask(p.mask, p.maskSize, u, v);
+                amount8 = std::max(amount8, (1.0f - keep) * amount);
+            }
             float values[3];
             if (amount8 <= 0.f) {
                 for (int c = 0; c < 3; ++c) values[c] = work[index + c];
             } else {
                 float near[3], far[3];
-                const float u = ((float)ox + 0.5f) * 0.5f - 0.5f;
-                const float v = ((float)oy + 0.5f) * 0.5f - 0.5f;
-                SampleBilinearRgb(level1, hw, hh, u, v, near);
+                const float uHalf = ((float)ox + 0.5f) * 0.5f - 0.5f;
+                const float vHalf = ((float)oy + 0.5f) * 0.5f - 0.5f;
+                SampleBilinearRgb(level1, hw, hh, uHalf, vHalf, near);
                 if (amount8 < 0.5f) {
                     const float mixAmount = amount8 * 2.f;
                     for (int c = 0; c < 3; ++c)
                         values[c] = work[index + c] + (near[c] - work[index + c]) * mixAmount;
                 } else {
-                    SampleBilinearRgb(level2, qw, qh, u * 0.5f, v * 0.5f, far);
+                    SampleBilinearRgb(level2, qw, qh, uHalf * 0.5f, vHalf * 0.5f, far);
                     const float mixAmount = (amount8 - 0.5f) * 2.f;
                     for (int c = 0; c < 3; ++c)
                         values[c] = near[c] + (far[c] - near[c]) * mixAmount;
