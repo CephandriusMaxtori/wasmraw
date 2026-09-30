@@ -37,22 +37,51 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build
+          sudo apt-get install -y ninja-build ccache
+
+      - name: Restore Emscripten cache
+        uses: actions/cache@v4
+        with:
+          path: ~/emsdk
+          key: emsdk-${{ runner.os }}-${{ hashFiles('.github/workflows/pages.yml', 'CMakeLists.txt') }}
+          restore-keys: |
+            emsdk-${{ runner.os }}-
+
+      - name: Restore ImGui cache
+        uses: actions/cache@v4
+        with:
+          path: ~/imgui
+          key: imgui-${{ runner.os }}-docking
+          restore-keys: |
+            imgui-${{ runner.os }}-
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('app/decoder.cpp', 'app/tone_common.h', 'app/third_party/**') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
 
       - name: Install Emscripten
         run: |
-          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          if [ ! -d "$HOME/emsdk" ]; then
+            git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          fi
           "$HOME/emsdk/emsdk" install latest
           "$HOME/emsdk/emsdk" activate latest
           echo "EMSDK=$HOME/emsdk" >> "$GITHUB_ENV"
 
       - name: Install Dear ImGui
-        run: git clone --depth 1 --branch docking https://github.com/ocornut/imgui.git "$HOME/imgui"
+        run: |
+          if [ ! -d "$HOME/imgui/.git" ]; then
+            git clone --depth 1 --branch docking https://github.com/ocornut/imgui.git "$HOME/imgui"
+          fi
 
       - name: Configure CMake
         run: |
           source "$EMSDK/emsdk_env.sh" > /dev/null
-          emcmake cmake -G Ninja -B build-wasm -DCMAKE_BUILD_TYPE=Release -DIMGUI_DIR="$HOME/imgui" .
+          emcmake cmake -G Ninja -B build-wasm -DCMAKE_BUILD_TYPE=Release -DIMGUI_DIR="$HOME/imgui" -DCMAKE_CXX_COMPILER_LAUNCHER=ccache .
 
       - name: Build WASM modules
         run: |
@@ -61,6 +90,8 @@ jobs:
           cp app/decoder-worker.js build-wasm/decoder-worker.js
 
       - name: Run headless smoke test
+        env:
+          EMCC_USE_CCACHE: '1'
         run: |
           set -o pipefail
           source "$EMSDK/emsdk_env.sh" > /dev/null

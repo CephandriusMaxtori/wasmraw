@@ -88,6 +88,22 @@ git worktree add gh-pages gh-pages-out   # or push the folder to a gh-pages bran
 The worker loads `decoder.js` + `decoder.wasm` relative to its own script URL, so
 it keeps working under a `/repo/` path; no base-tag or server config required.
 
+## Continuous integration
+
+`.github/workflows/pages.yml` builds on every push to `main`, runs the headless
+smoke test, uploads the site as a downloadable `wasmraw-site` artifact, and
+deploys to Pages. Three caches keep repeat runs fast:
+
+| Cache | Contents | Invalidated by |
+| --- | --- | --- |
+| `emsdk` | Installed Emscripten toolchain (~1.5 GB) | Workflow or `CMakeLists.txt` change |
+| `imgui` | Dear ImGui `docking` checkout | `imgui` branch moves |
+| `ccache` | Compiled LibRaw objects | `decoder.cpp`, `tone_common.h`, `third_party/` |
+
+The install steps are written to be cache-safe: they clone only when the
+directory is missing, and `emsdk install latest` still upgrades the toolchain
+when a newer release appears, so a stale cache never pins you to old code.
+
 ## Layout
 
 ```
