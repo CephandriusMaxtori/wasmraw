@@ -555,15 +555,18 @@
         }
       }
 
-      window._wasmraw = {
-        get ready() { return runtimeReady; },
-        decode: function (bytes, name) { return loadBytes(bytes, name); },
-        select: function (id) { selectImage(id); },
-        requestPreview: requestPreview,
-        requestExport: requestExport,
-        saveProfile: saveProfile,
-        loadProfile: loadProfile
-      };
+        function openFileDialog() { inputElement.click(); }
+
+        window._wasmraw = {
+          get ready() { return runtimeReady; },
+          decode: function (bytes, name) { return loadBytes(bytes, name); },
+          select: function (id) { selectImage(id); },
+          requestPreview: requestPreview,
+          requestExport: requestExport,
+          saveProfile: saveProfile,
+          loadProfile: loadProfile,
+          openFileDialog: openFileDialog
+        };
 
       canvasElement.addEventListener('webglcontextlost', function (event) {
         alert('WebGL context lost. You will need to reload the page.');

@@ -109,6 +109,13 @@ static bool g_wbPicking = false;
 static bool g_dofPicking = false;
 static bool g_skipHistory = false;
 static bool g_controlHovered = false;
+static bool g_showPreview = true;
+static bool g_showNavigator = true;
+static bool g_showFilmstrip = true;
+static bool g_showHistory = true;
+static bool g_showToolbox = true;
+static bool g_showHistogram = true;
+static bool g_showStatus = true;
 static bool g_controlChanged = false;
 static bool g_beforeAfter = false;
 static int g_requestedImageId = 0;
@@ -799,6 +806,10 @@ EM_JS(void, js_save_profile, (), {
 EM_JS(void, js_load_profile, (), {
     if (window._wasmraw && window._wasmraw.loadProfile) window._wasmraw.loadProfile();
 });
+
+EM_JS(void, js_open_file_dialog, (), {
+    if (window._wasmraw && window._wasmraw.openFileDialog) window._wasmraw.openFileDialog();
+});
 #endif
 
 static void RequestExport(int format)
@@ -992,7 +1003,7 @@ static void ComputeHistogram()
 static void DrawHistogram()
 {
     if (g_histDirty) ComputeHistogram();
-    ImGui::Begin("Histogram");
+    ImGui::Begin("Histogram", &g_showHistogram);
     if (!g_dec->loaded || g_rgba.empty()) {
         if (g_dec->id > 0 && !g_dec->loaded)
             ImGui::TextDisabled("Loading %s", g_dec->lastStatus);
@@ -1017,7 +1028,7 @@ static void DrawHistogram()
 
 static void DrawNavigator()
 {
-    ImGui::Begin("Navigator");
+    ImGui::Begin("Navigator", &g_showNavigator);
     if (g_dec->id > 0 && !g_dec->loaded) {
         ImGui::TextDisabled("Loading %s", g_dec->lastStatus);
         ImGui::End();
@@ -1086,7 +1097,7 @@ static void DrawNavigator()
 
 static void DrawHistory()
 {
-    ImGui::Begin("History");
+    ImGui::Begin("History", &g_showHistory);
     if (!g_dec || g_dec->id == 0) {
         ImGui::TextDisabled("No image loaded");
         ImGui::End();
@@ -1135,7 +1146,7 @@ static void SelectDocument(ImageDocument* doc)
 static void DrawFilmstrip()
 {
     ImGui::SetNextWindowSize(ImVec2(220.0f, 420.0f), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Filmstrip");
+    ImGui::Begin("Filmstrip", &g_showFilmstrip);
     if (g_images.empty()) {
         ImGui::TextDisabled("No images loaded");
         ImGui::End();
@@ -1219,7 +1230,7 @@ static bool SliderIntWithReset(const char* label, int* value, int minValue, int 
 
 static void DrawToolbox()
 {
-    ImGui::Begin("Toolbox");
+    ImGui::Begin("Toolbox", &g_showToolbox);
     SliderFloatWithReset("Exposure", &g_dec->exposure, -5.0f, 5.0f, "%.2f EV", 0.0f);
     ImGui::TextUnformatted("Black / White points");
     SliderIntWithReset("Black", &g_dec->black, 0, 50, "%d", 0);
@@ -1381,7 +1392,7 @@ static void DrawToolbox()
 
 static void DrawPreview()
 {
-    ImGui::Begin("Preview");
+    ImGui::Begin("Preview", &g_showPreview);
     if (!(g_tex && g_texW > 0 && g_texH > 0)) {
         if (g_dec->id > 0 && !g_dec->loaded)
             ImGui::TextDisabled("Loading %s", g_dec->lastStatus);
@@ -1540,7 +1551,7 @@ static void DrawPreview()
 
 static void DrawStatus()
 {
-    ImGui::Begin("Status");
+    ImGui::Begin("Status", &g_showStatus);
     ImGui::TextWrapped("%s", g_dec->lastStatus);
     if (g_dec->loaded) {
         ImGui::Separator();
@@ -1612,6 +1623,64 @@ static void HandleShortcuts()
     }
 }
 
+static void DrawMainMenuBar()
+{
+    if (!ImGui::BeginMainMenuBar()) return;
+
+    if (ImGui::BeginMenu("File")) {
+        if (ImGui::MenuItem("Import Image(s)...")) {
+#ifdef __EMSCRIPTEN__
+            js_open_file_dialog();
+#else
+            g_showStatus = true;
+#endif
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Close all panels")) {
+            g_showPreview = false;
+            g_showNavigator = false;
+            g_showFilmstrip = false;
+            g_showHistory = false;
+            g_showToolbox = false;
+            g_showHistogram = false;
+            g_showStatus = false;
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("View")) {
+        ImGui::MenuItem("Preview", nullptr, &g_showPreview);
+        ImGui::MenuItem("Toolbox", nullptr, &g_showToolbox);
+        ImGui::MenuItem("Navigator", nullptr, &g_showNavigator);
+        ImGui::MenuItem("Histogram", nullptr, &g_showHistogram);
+        ImGui::MenuItem("Filmstrip", nullptr, &g_showFilmstrip);
+        ImGui::MenuItem("History", nullptr, &g_showHistory);
+        ImGui::MenuItem("Status", nullptr, &g_showStatus);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Show all panels")) {
+            g_showPreview = true;
+            g_showNavigator = true;
+            g_showFilmstrip = true;
+            g_showHistory = true;
+            g_showToolbox = true;
+            g_showHistogram = true;
+            g_showStatus = true;
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Help")) {
+        if (ImGui::MenuItem("Import images")) g_showToolbox = true;
+        ImGui::Separator();
+        ImGui::TextDisabled("Ctrl+O  Import images");
+        ImGui::TextDisabled("Ctrl+Z / Ctrl+Y  Undo / Redo");
+        ImGui::TextDisabled("Drop files anywhere to add them");
+        ImGui::EndMenu();
+    }
+
+    ImGui::EndMainMenuBar();
+}
+
 static void RenderFrame(GLFWwindow* window)
 {
     glfwPollEvents();
@@ -1625,6 +1694,8 @@ static void RenderFrame(GLFWwindow* window)
     HandleShortcuts();
 
     if (g_previewDirty && g_dec->loaded) RebuildPreview();
+
+    DrawMainMenuBar();
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -1640,13 +1711,13 @@ static void RenderFrame(GLFWwindow* window)
     ImGui::DockSpace(dockspaceId);
     ImGui::End();
 
-    DrawPreview();
-    DrawNavigator();
-    DrawFilmstrip();
-    DrawHistory();
-    DrawToolbox();
-    DrawHistogram();
-    DrawStatus();
+    if (g_showPreview) DrawPreview();
+    if (g_showNavigator) DrawNavigator();
+    if (g_showFilmstrip) DrawFilmstrip();
+    if (g_showHistory) DrawHistory();
+    if (g_showToolbox) DrawToolbox();
+    if (g_showHistogram) DrawHistogram();
+    if (g_showStatus) DrawStatus();
     g_controlHovered = ImGui::IsAnyItemHovered() ||
                        ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow |
                                              ImGuiHoveredFlags_DockHierarchy |
