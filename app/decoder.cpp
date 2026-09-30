@@ -30,6 +30,8 @@ static Decoded g_dec;
 
 static std::vector<unsigned char> g_exportBuf;
 static std::vector<unsigned char> g_renderedPreview;
+static int g_renderedWidth = 0;
+static int g_renderedHeight = 0;
 static char g_exportStatus[160] = "";
 
 // Decode session (kept alive across phase calls so the browser can show
@@ -292,7 +294,8 @@ int dec_render_preview(double exposure, double black, double white, double contr
                        double sharpenRadius, double denoise, double vibrance,
                        double ca, double distortion, double shadows, double highlights,
                        double cy0, double cy1, double cy2, double cy3, double cy4,
-                       int quality)
+                       double cropLeft, double cropTop, double cropRight, double cropBottom,
+                       int rotate, int quality)
 {
     g_renderedPreview.clear();
     if (!g_dec.loaded || g_dec.previewRgb.empty()) return 0;
@@ -324,7 +327,13 @@ int dec_render_preview(double exposure, double black, double white, double contr
     p.curveY[2] = (float)cy2;
     p.curveY[3] = (float)cy3;
     p.curveY[4] = (float)cy4;
+    p.cropLeft = (float)cropLeft;
+    p.cropTop = (float)cropTop;
+    p.cropRight = (float)cropRight;
+    p.cropBottom = (float)cropBottom;
+    p.rotate = rotate;
     tone::ToneMapToBuffer(g_dec.previewRgb, g_dec.pw, g_dec.ph, p, g_renderedPreview);
+    tone::GetOutputSize(g_dec.pw, g_dec.ph, p, g_renderedWidth, g_renderedHeight);
     return 1;
 }
 
@@ -341,10 +350,10 @@ size_t dec_rendered_preview_size()
 }
 
 EMSCRIPTEN_KEEPALIVE
-int dec_rendered_preview_width() { return g_dec.pw; }
+int dec_rendered_preview_width() { return g_renderedWidth; }
 
 EMSCRIPTEN_KEEPALIVE
-int dec_rendered_preview_height() { return g_dec.ph; }
+int dec_rendered_preview_height() { return g_renderedHeight; }
 
 // Tone-maps the native-resolution copy with the given params and encodes the
 // result (format 0 = PNG, 1 = JPEG). Runs entirely on the worker thread.
@@ -356,13 +365,14 @@ int dec_export_write(double exposure, double black, double white, double contras
                      double sharpenRadius, double denoise, double vibrance,
                      double ca, double distortion, double shadows, double highlights,
                      double cy0, double cy1, double cy2, double cy3, double cy4,
-                     int fullRes, int format, int quality)
+                     double cropLeft, double cropTop, double cropRight, double cropBottom,
+                     int rotate, int fullRes, int format, int quality)
 {
     g_exportBuf.clear();
     const bool useFullResolution = fullRes != 0;
     const std::vector<float>& source = useFullResolution ? g_dec.fullRgb : g_dec.previewRgb;
-    const int outputWidth = useFullResolution ? g_dec.w : g_dec.pw;
-    const int outputHeight = useFullResolution ? g_dec.h : g_dec.ph;
+    int outputWidth = useFullResolution ? g_dec.w : g_dec.pw;
+    int outputHeight = useFullResolution ? g_dec.h : g_dec.ph;
     if (!g_dec.loaded || source.empty() || outputWidth <= 0 || outputHeight <= 0) {
         snprintf(g_exportStatus, sizeof(g_exportStatus), "Nothing loaded to export");
         return 0;
@@ -395,6 +405,12 @@ int dec_export_write(double exposure, double black, double white, double contras
     p.curveY[2] = (float)cy2;
     p.curveY[3] = (float)cy3;
     p.curveY[4] = (float)cy4;
+    p.cropLeft = (float)cropLeft;
+    p.cropTop = (float)cropTop;
+    p.cropRight = (float)cropRight;
+    p.cropBottom = (float)cropBottom;
+    p.rotate = rotate;
+    tone::GetOutputSize(outputWidth, outputHeight, p, outputWidth, outputHeight);
 
     std::vector<unsigned char> rgba8;
     tone::ToneMapToBuffer(source, outputWidth, outputHeight, p, rgba8);

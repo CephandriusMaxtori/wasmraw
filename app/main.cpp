@@ -39,6 +39,11 @@ struct EditState {
     float wb[3] = { 1.0f, 1.0f, 1.0f };
     int wbPreset = 0;
     float curveY[5] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+    float cropLeft = 0.0f;
+    float cropTop = 0.0f;
+    float cropRight = 1.0f;
+    float cropBottom = 1.0f;
+    int rotate = 0;
     int jpegQuality = 90;
 };
 
@@ -111,6 +116,9 @@ static bool EditStateEqual(const EditState& a, const EditState& b)
            a.vibrance == b.vibrance && a.ca == b.ca && a.distortion == b.distortion &&
            a.shadows == b.shadows && a.highlights == b.highlights &&
            a.wbPreset == b.wbPreset && a.jpegQuality == b.jpegQuality &&
+           a.cropLeft == b.cropLeft && a.cropTop == b.cropTop &&
+           a.cropRight == b.cropRight && a.cropBottom == b.cropBottom &&
+           a.rotate == b.rotate &&
            a.wb[0] == b.wb[0] && a.wb[1] == b.wb[1] && a.wb[2] == b.wb[2] &&
            a.curveY[0] == b.curveY[0] && a.curveY[1] == b.curveY[1] &&
            a.curveY[2] == b.curveY[2] && a.curveY[3] == b.curveY[3] &&
@@ -322,20 +330,50 @@ static tone::Params CurrentToneParams()
     p.highlights = (float)g_dec->highlights / 100.0f;
     p.wbR = g_dec->wb[0]; p.wbG = g_dec->wb[1]; p.wbB = g_dec->wb[2];
     for (int i = 0; i < 5; ++i) p.curveY[i] = g_dec->curveY[i];
+    p.cropLeft = g_dec->cropLeft;
+    p.cropTop = g_dec->cropTop;
+    p.cropRight = g_dec->cropRight;
+    p.cropBottom = g_dec->cropBottom;
+    p.rotate = g_dec->rotate;
     return p;
 }
 
 static void ToneMapPreview()
 {
     if (!g_dec->loaded || g_dec->pw <= 0 || g_dec->ph <= 0) return;
-    tone::ToneMapToBuffer(g_dec->rgb, g_dec->pw, g_dec->ph, CurrentToneParams(), g_rgba);
+    tone::Params params = CurrentToneParams();
+    tone::ToneMapToBuffer(g_dec->rgb, g_dec->pw, g_dec->ph, params, g_rgba);
     if (!g_rgba.empty()) {
+        tone::GetOutputSize(g_dec->pw, g_dec->ph, params,
+                            g_dec->renderedWidth, g_dec->renderedHeight);
         g_dec->rendered = g_rgba;
-        g_dec->renderedWidth = g_dec->pw;
-        g_dec->renderedHeight = g_dec->ph;
         g_dec->renderedQuality = 0;
         g_dec->renderedRevision = g_dec->revision;
     }
+}
+
+static void MapOutputToSource(int outputX, int outputY, int& sourceX, int& sourceY)
+{
+    tone::Params params = CurrentToneParams();
+    int left, top, right, bottom;
+    tone::GetCropBounds(g_dec->pw, g_dec->ph, params, left, top, right, bottom);
+    int cropW = std::max(1, right - left);
+    int cropH = std::max(1, bottom - top);
+    int rotation = ((g_dec->rotate % 360) + 360) % 360;
+    int cropX = outputX;
+    int cropY = outputY;
+    if (rotation == 90) {
+        cropX = outputY;
+        cropY = cropW - 1 - outputX;
+    } else if (rotation == 180) {
+        cropX = cropW - 1 - outputX;
+        cropY = cropH - 1 - outputY;
+    } else if (rotation == 270) {
+        cropX = cropH - 1 - outputY;
+        cropY = outputX;
+    }
+    sourceX = std::clamp(left + cropX, 0, g_dec->pw - 1);
+    sourceY = std::clamp(top + cropY, 0, g_dec->ph - 1);
 }
 
 static void RebuildPreview()
@@ -376,12 +414,13 @@ EM_JS(void, js_request_preview, (int imageId, int revision,
                                   double sharpenRadius, double denoise, double vibrance,
                                   double ca, double distortion, double shadows, double highlights,
                                   double cy0, double cy1, double cy2, double cy3, double cy4,
-                                  int quality), {
+                                  double cropLeft, double cropTop, double cropRight, double cropBottom,
+                                  int rotate, int quality), {
     if (!window._wasmraw || !window._wasmraw.requestPreview) return;
     window._wasmraw.requestPreview(imageId, revision, exp, black, white, contrast, sat,
         temperature, tint, wbR, wbG, wbB, vignette, clarity, clarityRadius,
         sharpening, sharpenRadius, denoise, vibrance, ca, distortion, shadows, highlights,
-        cy0, cy1, cy2, cy3, cy4, quality);
+        cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom, rotate, quality);
 });
 #endif
 
@@ -410,7 +449,8 @@ static void RequestPreview()
                        (double)g_dec->shadows / 100.0,
                        (double)g_dec->highlights / 100.0,
                        g_dec->curveY[0], g_dec->curveY[1], g_dec->curveY[2], g_dec->curveY[3], g_dec->curveY[4],
-                       0);
+                       g_dec->cropLeft, g_dec->cropTop, g_dec->cropRight, g_dec->cropBottom,
+                       g_dec->rotate, 0);
 #else
     g_previewDirty = true;
 #endif
@@ -550,12 +590,14 @@ EM_JS(void, js_request_export, (int imageId, int revision, int fmt, int fullRes,
                                 double sharpenRadius, double denoise, double vibrance,
                                 double ca, double distortion, double shadows, double highlights,
                                 double cy0, double cy1, double cy2, double cy3, double cy4,
-                                double quality), {
+                                double cropLeft, double cropTop, double cropRight, double cropBottom,
+                                int rotate, double quality), {
     if (!window._wasmraw || !window._wasmraw.requestExport) return;
     window._wasmraw.requestExport(imageId, revision, fmt, fullRes, exp, black, white,
         contrast, sat, temperature, tint, wbR, wbG, wbB, vignette, clarity, clarityRadius,
         sharpening, sharpenRadius, denoise, vibrance, ca, distortion, shadows, highlights,
-        cy0, cy1, cy2, cy3, cy4, Math.floor(quality));
+        cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom, rotate,
+        Math.floor(quality));
 });
 
 EM_JS(void, js_select_image, (int imageId), {
@@ -590,7 +632,8 @@ static void RequestExport(int format)
                       (double)g_dec->shadows / 100.0,
                       (double)g_dec->highlights / 100.0,
                       g_dec->curveY[0], g_dec->curveY[1], g_dec->curveY[2], g_dec->curveY[3], g_dec->curveY[4],
-                      g_dec->jpegQuality);
+                      g_dec->cropLeft, g_dec->cropTop, g_dec->cropRight, g_dec->cropBottom,
+                      g_dec->rotate, g_dec->jpegQuality);
 #else
     (void)format;
 #endif
@@ -737,7 +780,9 @@ static void ComputeHistogram()
     memset(g_histG, 0, sizeof(g_histG));
     memset(g_histB, 0, sizeof(g_histB));
     const unsigned char* s = g_rgba.data();
-    size_t n = (size_t)g_dec->pw * g_dec->ph;
+    int renderedW = g_dec->renderedWidth > 0 ? g_dec->renderedWidth : g_dec->pw;
+    int renderedH = g_dec->renderedHeight > 0 ? g_dec->renderedHeight : g_dec->ph;
+    size_t n = (size_t)renderedW * renderedH;
     for (size_t i = 0; i < n; ++i) {
         unsigned char r = s[i * 4], gg = s[i * 4 + 1], b = s[i * 4 + 2];
         int lum = ((int)r * 77 + (int)gg * 151 + (int)b * 28) >> 8;
@@ -823,16 +868,18 @@ static void DrawNavigator()
         float u = (mouse.x - origin.x) / shown.x;
         float v = (mouse.y - origin.y) / shown.y;
         if (u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f) {
-            int px = std::clamp((int)(u * (g_dec->pw - 1)), 0, g_dec->pw - 1);
-            int py = std::clamp((int)(v * (g_dec->ph - 1)), 0, g_dec->ph - 1);
+            int outputX = std::clamp((int)(u * (g_texW - 1)), 0, g_texW - 1);
+            int outputY = std::clamp((int)(v * (g_texH - 1)), 0, g_texH - 1);
+            int px, py;
+            MapOutputToSource(outputX, outputY, px, py);
             const float* pixel = &g_dec->rgb[((size_t)py * g_dec->pw + px) * 3];
             ImGui::Text("Pixel %d, %d", px, py);
             ImGui::Text("RGB %.3f %.3f %.3f", pixel[0], pixel[1], pixel[2]);
             if (ImGui::IsMouseClicked(0)) {
                 g_zoomFit = false;
                 g_zoom = viewScale;
-                g_pan.x = (px + 0.5f - imageWidth * 0.5f) * viewScale;
-                g_pan.y = (py + 0.5f - imageHeight * 0.5f) * viewScale;
+                g_pan.x = (outputX + 0.5f - imageWidth * 0.5f) * viewScale;
+                g_pan.y = (outputY + 0.5f - imageHeight * 0.5f) * viewScale;
             }
         }
     }
@@ -997,6 +1044,45 @@ static void DrawToolbox()
         SliderIntWithReset("Chromatic aberration", &g_dec->ca, -100, 100, "%d", 0);
         SliderIntWithReset("Distortion", &g_dec->distortion, -100, 100, "%d", 0);
     }
+    if (ImGui::CollapsingHeader("Geometry")) {
+        const char* rotationNames[] = { "0 degrees", "90 degrees", "180 degrees", "270 degrees" };
+        int rotationIndex = ((g_dec->rotate % 360) + 360) % 360 / 90;
+        if (ImGui::Combo("Rotation", &rotationIndex, rotationNames, 4)) {
+            g_dec->rotate = rotationIndex * 90;
+            MarkToneDirty();
+            g_controlChanged = true;
+        }
+        if (ImGui::Button("Rotate left")) {
+            g_dec->rotate = (g_dec->rotate + 270) % 360;
+            MarkToneDirty();
+            g_controlChanged = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Rotate right")) {
+            g_dec->rotate = (g_dec->rotate + 90) % 360;
+            MarkToneDirty();
+            g_controlChanged = true;
+        }
+        float crop[4] = { g_dec->cropLeft, g_dec->cropTop, g_dec->cropRight, g_dec->cropBottom };
+        if (ImGui::DragFloat4("Crop L/T/R/B", crop, 0.005f, 0.0f, 1.0f, "%.3f")) {
+            g_dec->cropLeft = crop[0];
+            g_dec->cropTop = crop[1];
+            g_dec->cropRight = crop[2];
+            g_dec->cropBottom = crop[3];
+            MarkToneDirty();
+            g_controlChanged = true;
+        }
+        if (ImGui::SmallButton("Reset geometry")) {
+            g_dec->cropLeft = 0.0f;
+            g_dec->cropTop = 0.0f;
+            g_dec->cropRight = 1.0f;
+            g_dec->cropBottom = 1.0f;
+            g_dec->rotate = 0;
+            MarkToneDirty();
+            g_controlChanged = true;
+        }
+        ImGui::TextDisabled("Crop values are normalized to the source image");
+    }
 
     ImGui::Separator();
     ImGui::TextUnformatted("White balance");
@@ -1142,9 +1228,10 @@ static void DrawPreview()
     if (g_wbPicking && hovered && ImGui::IsMouseClicked(0) && g_dec->loaded && g_dec->pw > 0) {
         float u = (mouse.x - tlx) / iw, v = (mouse.y - tly) / ih;
         if (u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f) {
-            int px = (int)(u * (float)(g_dec->pw - 1));
-            int py = (int)(v * (float)(g_dec->ph - 1));
-            if (px < 0) px = 0; if (py < 0) py = 0;
+            int outputX = std::clamp((int)(u * (float)(g_texW - 1)), 0, g_texW - 1);
+            int outputY = std::clamp((int)(v * (float)(g_texH - 1)), 0, g_texH - 1);
+            int px, py;
+            MapOutputToSource(outputX, outputY, px, py);
             float sum[3] = { 0, 0, 0 };
             int ns = 0;
             for (int dy = -1; dy <= 1; ++dy) {
@@ -1213,6 +1300,8 @@ static void DrawStatus()
         ImGui::Text("Source: %d x %d, %d-bit, %d channels",
                     g_dec->w, g_dec->h, g_dec->bits, g_dec->colors);
         ImGui::Text("Preview: %d x %d (max %d)", g_dec->pw, g_dec->ph, kPreviewMaxDim);
+        if (g_dec->renderedWidth > 0 && g_dec->renderedHeight > 0)
+            ImGui::Text("Output: %d x %d", g_dec->renderedWidth, g_dec->renderedHeight);
         ImGui::Text("Render quality: %s", g_dec->renderedQuality == 1 ? "final" : "draft");
         ImGui::Text("EV %+.2f  Black %d  White %d  Contrast %.0f  Sat %.0f",
                     g_dec->exposure, g_dec->black, g_dec->white, g_dec->contrast, g_dec->saturation);

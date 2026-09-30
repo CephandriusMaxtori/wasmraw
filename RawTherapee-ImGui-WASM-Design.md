@@ -386,17 +386,18 @@ shared CPU pipeline instead of importing the full GTK-dependent `rtengine`.
 - **Editor UI**: filmstrip, history/snapshots, navigator overview, pixel readout,
   undo/redo, zoom/navigation shortcuts, and keyboard image selection.
 - **Expanded tools**: temperature/tint, vibrance, sharpening, noise reduction,
-  chromatic aberration, and distortion correction share `app/tone_common.h` with
-  native-resolution export.
+  chromatic aberration, distortion correction, normalized crop, and 90-degree
+  rotation share `app/tone_common.h` with native-resolution export.
 - **Progressive rendering**: the worker sends a draft preview followed by a final
   render; local-contrast and denoise work is disabled for drafts.
 - **Export selection**: native-resolution and preview-resolution PNG/JPEG export
   are both supported.
-- **Validation**: `build.ps1 -Smoke` checks decode statistics, worker-side preview
-  rendering, and PNG/JPEG output signatures.
+- **Validation**: `build.ps1 -Smoke` checks decode statistics, exposure changes,
+  rotation/crop output dimensions, worker-side preview rendering, and PNG/JPEG
+  output signatures.
 
-Remaining Phase 2 follow-up: crop/rotate, stronger browser automation, full
-profile serialization, and optional separation of preview/export workers. Full
+Remaining Phase 2 follow-up: stronger browser automation, full profile
+serialization, masks, and optional separation of preview/export workers. Full
 `rtengine` integration remains a later compatibility track.
 
 ---

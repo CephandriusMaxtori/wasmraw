@@ -33,7 +33,43 @@ struct Params {
     float shadows = 0.f;
     float highlights = 0.f;
     float curveY[5] = { 0.f, 0.25f, 0.5f, 0.75f, 1.f };
+    float cropLeft = 0.f;
+    float cropTop = 0.f;
+    float cropRight = 1.f;
+    float cropBottom = 1.f;
+    int rotate = 0;
 };
+
+static inline void GetCropBounds(int w, int h, const Params& p,
+                                 int& left, int& top, int& right, int& bottom)
+{
+    float x0 = std::clamp(std::min(p.cropLeft, p.cropRight), 0.f, 1.f);
+    float x1 = std::clamp(std::max(p.cropLeft, p.cropRight), 0.f, 1.f);
+    float y0 = std::clamp(std::min(p.cropTop, p.cropBottom), 0.f, 1.f);
+    float y1 = std::clamp(std::max(p.cropTop, p.cropBottom), 0.f, 1.f);
+    if (x1 - x0 < 0.001f) x1 = std::min(1.f, x0 + 0.001f);
+    if (y1 - y0 < 0.001f) y1 = std::min(1.f, y0 + 0.001f);
+    left = std::clamp((int)std::floor(x0 * (float)w), 0, w - 1);
+    top = std::clamp((int)std::floor(y0 * (float)h), 0, h - 1);
+    right = std::clamp((int)std::ceil(x1 * (float)w), left + 1, w);
+    bottom = std::clamp((int)std::ceil(y1 * (float)h), top + 1, h);
+}
+
+static inline void GetOutputSize(int w, int h, const Params& p, int& outW, int& outH)
+{
+    int left, top, right, bottom;
+    GetCropBounds(w, h, p, left, top, right, bottom);
+    int cropW = std::max(1, right - left);
+    int cropH = std::max(1, bottom - top);
+    int normalizedRotation = ((p.rotate % 360) + 360) % 360;
+    if (normalizedRotation == 90 || normalizedRotation == 270) {
+        outW = cropH;
+        outH = cropW;
+    } else {
+        outW = cropW;
+        outH = cropH;
+    }
+}
 
 static inline float EvalCurve(const float* y, float x)
 {
@@ -54,42 +90,50 @@ static inline float EvalCurve(const float* y, float x)
 static inline void ToneMapToBuffer(const std::vector<float>& src, int w, int h,
                                    const Params& p, std::vector<unsigned char>& rgba8)
 {
-    rgba8.resize((size_t)w * h * 4);
+    int left, top, right, bottom;
+    GetCropBounds(w, h, p, left, top, right, bottom);
+    int outW, outH;
+    GetOutputSize(w, h, p, outW, outH);
+    rgba8.resize((size_t)outW * outH * 4);
+
     const float* source = src.data();
-    const size_t n = (size_t)w * h;
+    const size_t sourceCount = (size_t)w * h;
     const float ev = exp2f(p.exposure);
     const float cmul = powf(2.0f, p.contrast);
     const float wb[3] = { p.wbR, p.wbG, p.wbB };
     const float temperatureR = 1.f + p.temperature * 0.20f;
     const float temperatureG = 1.f + p.tint * 0.15f;
     const float temperatureB = 1.f - p.temperature * 0.20f;
-    const float cx = (float)w * 0.5f;
-    const float cy = (float)h * 0.5f;
-    const float rScale = 4.0f / ((float)(w * w) + (float)(h * h));
+    const float outputCx = (float)outW * 0.5f;
+    const float outputCy = (float)outH * 0.5f;
+    const float rScale = 4.0f / ((float)(outW * outW) + (float)(outH * outH));
     const float maxDim = (float)std::max(w, h);
     const float radiusScale = maxDim / 1600.0f;
     const bool needsLuma = p.clarity != 0.f || p.sharpening != 0.f;
     const float denoiseAmount = p.denoise < 0.f ? 0.f : (p.denoise > 1.f ? 1.f : p.denoise);
+    const int normalizedRotation = ((p.rotate % 360) + 360) % 360;
+    const int cropW = right - left;
+    const int cropH = bottom - top;
 
     std::vector<float> blurY;
     if (needsLuma && maxDim > 0.f) {
-        blurY.resize(n);
-        for (size_t i = 0; i < n; ++i)
+        blurY.resize(sourceCount);
+        for (size_t i = 0; i < sourceCount; ++i)
             blurY[i] = 0.2126f * source[i * 3] + 0.7152f * source[i * 3 + 1] + 0.0722f * source[i * 3 + 2];
 
         const float radius = std::max(0.5f, (p.sharpening != 0.f ? p.sharpenRadius : p.clarityRadius) * radiusScale);
         const float sigma = std::max(0.35f, radius * 0.5f);
-        const int half = std::max(1, (int)ceilf(sigma * 2.0f));
+        const int half = std::max(1, (int)std::ceil(sigma * 2.0f));
         std::vector<float> kernel((size_t)half * 2 + 1);
         float sum = 0.f;
         for (int k = -half; k <= half; ++k) {
-            float value = expf(-(float)(k * k) / (2.f * sigma * sigma));
+            float value = std::exp(-(float)(k * k) / (2.f * sigma * sigma));
             kernel[(size_t)(k + half)] = value;
             sum += value;
         }
         for (float& value : kernel) value /= sum;
 
-        std::vector<float> temporary(n);
+        std::vector<float> temporary(sourceCount);
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 float value = 0.f;
@@ -113,40 +157,58 @@ static inline void ToneMapToBuffer(const std::vector<float>& src, int w, int h,
     }
 
     auto sample = [&](float x, float y, int channel) {
-        int ix = std::clamp((int)floorf(x), 0, w - 1);
-        int iy = std::clamp((int)floorf(y), 0, h - 1);
+        int ix = std::clamp((int)std::floor(x), 0, w - 1);
+        int iy = std::clamp((int)std::floor(y), 0, h - 1);
         return source[((size_t)iy * w + ix) * 3 + channel];
     };
 
     unsigned char* destination = rgba8.data();
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            const size_t index = (size_t)y * w + x;
-            const float dx = (float)x - cx;
-            const float dy = (float)y - cy;
+    for (int oy = 0; oy < outH; ++oy) {
+        for (int ox = 0; ox < outW; ++ox) {
+            int ux = ox;
+            int uy = oy;
+            if (normalizedRotation == 90) {
+                ux = oy;
+                uy = cropW - 1 - ox;
+            } else if (normalizedRotation == 180) {
+                ux = cropW - 1 - ox;
+                uy = cropH - 1 - oy;
+            } else if (normalizedRotation == 270) {
+                ux = cropH - 1 - oy;
+                uy = ox;
+            }
+            const int sourceX = left + ux;
+            const int sourceY = top + uy;
+            const size_t sourceIndex = (size_t)sourceY * w + sourceX;
+            const float dx = (float)ox - outputCx;
+            const float dy = (float)oy - outputCy;
             const float r2 = (dx * dx + dy * dy) * rScale;
-            const float radial = sqrtf(r2);
             const float vignetteMultiplier = 1.f + p.vignette * (0.30f * r2 + 0.10f * r2 * r2);
             const float caMultiplier = 1.f + p.ca * 0.18f * r2;
 
-            float sampleX = (float)x;
-            float sampleY = (float)y;
+            float sampleX = (float)sourceX;
+            float sampleY = (float)sourceY;
             if (p.distortion != 0.f) {
-                float scale = 1.f + p.distortion * 0.18f * r2;
-                sampleX = cx + dx * scale;
-                sampleY = cy + dy * scale;
+                const float sourceCx = (float)(left + cropW * 0.5);
+                const float sourceCy = (float)(top + cropH * 0.5);
+                const float sourceDx = sampleX - sourceCx;
+                const float sourceDy = sampleY - sourceCy;
+                const float sourceR2 = (sourceDx * sourceDx + sourceDy * sourceDy) * rScale;
+                const float scale = 1.f + p.distortion * 0.18f * sourceR2;
+                sampleX = sourceCx + sourceDx * scale;
+                sampleY = sourceCy + sourceDy * scale;
             }
 
             float values[3];
             for (int channel = 0; channel < 3; ++channel) {
                 float value = sample(sampleX, sampleY, channel);
                 if (needsLuma)
-                    value += (value - blurY[index]) * (p.clarity * 0.5f + p.sharpening * 0.7f);
+                    value += (value - blurY[sourceIndex]) * (p.clarity * 0.5f + p.sharpening * 0.7f);
                 if (denoiseAmount > 0.f) {
                     float average = 0.f;
-                    for (int oy = -1; oy <= 1; ++oy) {
-                        for (int ox = -1; ox <= 1; ++ox)
-                            average += sample(sampleX + ox, sampleY + oy, channel);
+                    for (int oySample = -1; oySample <= 1; ++oySample) {
+                        for (int oxSample = -1; oxSample <= 1; ++oxSample)
+                            average += sample(sampleX + oxSample, sampleY + oySample, channel);
                     }
                     average /= 9.f;
                     value += (average - value) * denoiseAmount * 0.65f;
@@ -181,10 +243,11 @@ static inline void ToneMapToBuffer(const std::vector<float>& src, int w, int h,
                 values[channel] = luma + (values[channel] - luma) * saturation;
             }
 
-            destination[index * 4 + 0] = (unsigned char)(SrgbEncode(values[0]) * 255.0f + 0.5f);
-            destination[index * 4 + 1] = (unsigned char)(SrgbEncode(values[1]) * 255.0f + 0.5f);
-            destination[index * 4 + 2] = (unsigned char)(SrgbEncode(values[2]) * 255.0f + 0.5f);
-            destination[index * 4 + 3] = 255;
+            const size_t outputIndex = (size_t)oy * outW + ox;
+            destination[outputIndex * 4 + 0] = (unsigned char)(SrgbEncode(values[0]) * 255.0f + 0.5f);
+            destination[outputIndex * 4 + 1] = (unsigned char)(SrgbEncode(values[1]) * 255.0f + 0.5f);
+            destination[outputIndex * 4 + 2] = (unsigned char)(SrgbEncode(values[2]) * 255.0f + 0.5f);
+            destination[outputIndex * 4 + 3] = 255;
         }
     }
 }

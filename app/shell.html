@@ -369,7 +369,7 @@
             Module.writeArrayToMemory(new Uint8Array(message.bytes), previewPtr);
             try {
               Module._wasm_accept_preview(message.imageId, previewPtr, message.w, message.h,
-                message.quality || 1, message.revision);
+                message.quality === undefined ? 1 : message.quality, message.revision);
             } finally {
               Module._free(previewPtr);
             }
@@ -431,7 +431,8 @@
                               temperature, tint, wbR, wbG, wbB, vignette,
                               clarity, clarityRadius, sharpening, sharpenRadius,
                               denoise, vibrance, ca, distortion, shadows, highlights,
-                              cy0, cy1, cy2, cy3, cy4, quality) {
+                              cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom,
+                              rotate, quality) {
         var record = findRecord(imageId);
         if (!record || !decodeWorker) return;
         record.revision = revision;
@@ -445,6 +446,8 @@
           denoise: denoise, vibrance: vibrance, ca: ca, distortion: distortion,
           shadows: shadows, highlights: highlights,
           cy0: cy0, cy1: cy1, cy2: cy2, cy3: cy3, cy4: cy4,
+          cropLeft: cropLeft, cropTop: cropTop, cropRight: cropRight, cropBottom: cropBottom,
+          rotate: rotate || 0,
           quality: quality === undefined ? 1 : quality
         };
         record.lastPreview = pendingPreview;
@@ -463,7 +466,8 @@
                              temperature, tint, wbR, wbG, wbB, vignette,
                              clarity, clarityRadius, sharpening, sharpenRadius,
                              denoise, vibrance, ca, distortion, shadows, highlights,
-                             cy0, cy1, cy2, cy3, cy4, quality) {
+                             cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom,
+                             rotate, quality) {
         if (!decodeWorker) return;
         if (activeWorkerImageId !== imageId) {
           updateRecordStatus(imageId, 'Select image before exporting');
@@ -478,6 +482,8 @@
           vibrance: vibrance, ca: ca, distortion: distortion,
           shadows: shadows, highlights: highlights,
           cy0: cy0, cy1: cy1, cy2: cy2, cy3: cy3, cy4: cy4,
+          cropLeft: cropLeft, cropTop: cropTop, cropRight: cropRight, cropBottom: cropBottom,
+          rotate: rotate || 0,
           quality: Math.floor(quality)
         });
       }

@@ -16,7 +16,8 @@ extern "C" int dec_render_preview(double exposure, double black, double white,
                                  double sharpenRadius, double denoise, double vibrance,
                                  double ca, double distortion, double shadows, double highlights,
                                  double cy0, double cy1, double cy2, double cy3, double cy4,
-                                 int quality);
+                                 double cropLeft, double cropTop, double cropRight, double cropBottom,
+                                 int rotate, int quality);
 extern "C" const unsigned char* dec_rendered_preview_ptr();
 extern "C" size_t dec_rendered_preview_size();
 extern "C" int dec_rendered_preview_width();
@@ -26,9 +27,10 @@ extern "C" int dec_export_write(double exposure, double black, double white,
                                 double wbR, double wbG, double wbB, double vignette,
                                 double clarity, double clarityRadius, double sharpening,
                                 double sharpenRadius, double denoise, double vibrance,
-                                double ca, double distortion, double shadows, double highlights,
-                                double cy0, double cy1, double cy2, double cy3, double cy4,
-                                int fullRes, int format, int quality);
+                                 double ca, double distortion, double shadows, double highlights,
+                                 double cy0, double cy1, double cy2, double cy3, double cy4,
+                                 double cropLeft, double cropTop, double cropRight, double cropBottom,
+                                 int rotate, int fullRes, int format, int quality);
 extern "C" size_t dec_export_size();
 extern "C" const unsigned char* dec_export_data();
 
@@ -78,7 +80,8 @@ int main(int argc, char** argv)
                                           0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
                                           0.2, 2.0, 0.2, 1.0, 0.1, 0.2,
                                           0.1, 0.1, 0.2, 0.1,
-                                          0.0, 0.25, 0.5, 0.75, 1.0, 1);
+                                                   0.0, 0.25, 0.5, 0.75, 1.0,
+                                                   0.0, 0.0, 1.0, 1.0, 0, 1);
         size_t renderedSize = dec_rendered_preview_size();
         bool renderedOk = rendered && dec_rendered_preview_ptr() &&
                           dec_rendered_preview_width() == pw &&
@@ -94,7 +97,8 @@ int main(int argc, char** argv)
                                                   0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
                                                   0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
                                                   0.0, 0.0, 0.0, 0.0,
-                                                  0.0, 0.25, 0.5, 0.75, 1.0, 1);
+                                                  0.0, 0.25, 0.5, 0.75, 1.0,
+                                           0.0, 0.0, 1.0, 1.0, 0, 1);
         const unsigned char* exposurePtr = dec_rendered_preview_ptr();
         bool exposureChanged = false;
         if (baseline && exposurePtr) {
@@ -106,11 +110,36 @@ int main(int argc, char** argv)
         printf("PREVIEW-EXPOSURE ok=%d\n", (exposureRendered && exposureChanged) ? 1 : 0);
         if (!exposureRendered || !exposureChanged) r = 1;
 
+        int rotated = dec_render_preview(0.0, 0.0, 1.0, 0.0, 1.0,
+                                          0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
+                                          0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
+                                          0.0, 0.0, 0.0, 0.0,
+                                          0.0, 0.25, 0.5, 0.75, 1.0,
+                                          0.0, 0.0, 1.0, 1.0, 90, 1);
+        bool rotateOk = rotated && dec_rendered_preview_width() == ph &&
+                        dec_rendered_preview_height() == pw &&
+                        dec_rendered_preview_size() == (size_t)ph * pw * 4;
+        printf("PREVIEW-ROTATE ok=%d\n", rotateOk ? 1 : 0);
+        if (!rotateOk) r = 1;
+
+        int cropped = dec_render_preview(0.0, 0.0, 1.0, 0.0, 1.0,
+                                         0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
+                                         0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
+                                         0.0, 0.0, 0.0, 0.0,
+                                         0.0, 0.25, 0.5, 0.75, 1.0,
+                                         0.25, 0.25, 0.75, 0.75, 0, 1);
+        bool cropOk = cropped && dec_rendered_preview_width() == 32 &&
+                      dec_rendered_preview_height() == 24 &&
+                      dec_rendered_preview_size() == (size_t)32 * 24 * 4;
+        printf("PREVIEW-CROP ok=%d\n", cropOk ? 1 : 0);
+        if (!cropOk) r = 1;
+
         int okPng = dec_export_write(0.0, 0.0, 1.0, 0.0, 1.0,
                                      0.0, 0.0, 1.0, 1.0, 1.0, 0.25,
                                      0.3, 2.0, 0.2, 1.0, 0.1, 0.0,
                                      0.0, 0.0, 0.2, 0.1,
-                                          0.0, 0.25, 0.5, 0.75, 1.0, 1, 0, 0);
+                                           0.0, 0.25, 0.5, 0.75, 1.0,
+                                           0.0, 0.0, 1.0, 1.0, 0, 1, 0, 0);
         size_t pngSz = dec_export_size();
         const unsigned char* png = dec_export_data();
         bool pngOk = okPng && pngSz > 0 && png && memcmp(png, kPngMagic, 8) == 0;
@@ -121,7 +150,8 @@ int main(int argc, char** argv)
                                      0.0, 0.0, 1.0, 1.0, 1.0, -0.25,
                                      0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
                                      0.0, 0.0, -0.2, -0.1,
-                                          0.0, 0.25, 0.5, 0.75, 1.0, 1, 1, 90);
+                                           0.0, 0.25, 0.5, 0.75, 1.0,
+                                           0.0, 0.0, 1.0, 1.0, 0, 1, 1, 90);
         size_t jpgSz = dec_export_size();
         const unsigned char* jpg = dec_export_data();
         bool jpgOk = okJpg && jpgSz > 0 && jpg && jpg[0] == 0xFF && jpg[1] == 0xD8;
