@@ -153,6 +153,9 @@ static ImVec2 g_previewContentSize(0.0f, 0.0f);
 static std::vector<unsigned char> g_rgba;
 static char g_exportStatus[160] = "";
 static const int kPreviewMaxDim = 1600;
+static const int kProfileValueCount = 33;
+static char g_profileJson[4096] = {0};
+static int g_profileJsonLength = 0;
 
 static void ResetPreviewView()
 {
@@ -582,6 +585,106 @@ void wasm_set_export_status(int imageId, const char* text)
     if (doc) snprintf(doc->exportStatus, sizeof(doc->exportStatus), "%s", text ? text : "");
 }
 
+EMSCRIPTEN_KEEPALIVE
+const char* wasm_get_profile_json()
+{
+    if (!g_dec || g_dec->id == 0) {
+        g_profileJsonLength = 2;
+        memcpy(g_profileJson, "{}", 3);
+        return g_profileJson;
+    }
+    std::string json = "{\"version\":1";
+    auto add = [&](const char* name, double value) {
+        char buffer[64];
+        snprintf(buffer, sizeof(buffer), ",\"%s\":%.9g", name, value);
+        json += buffer;
+    };
+    add("exposure", g_dec->exposure);
+    add("black", g_dec->black);
+    add("white", g_dec->white);
+    add("contrast", g_dec->contrast);
+    add("saturation", g_dec->saturation);
+    add("vignette", g_dec->vignette);
+    add("clarity", g_dec->clarity);
+    add("clarityRadius", g_dec->clarityRadius);
+    add("temperature", g_dec->temperature);
+    add("tint", g_dec->tint);
+    add("sharpening", g_dec->sharpening);
+    add("sharpenRadius", g_dec->sharpenRadius);
+    add("denoise", g_dec->denoise);
+    add("vibrance", g_dec->vibrance);
+    add("ca", g_dec->ca);
+    add("distortion", g_dec->distortion);
+    add("shadows", g_dec->shadows);
+    add("highlights", g_dec->highlights);
+    add("wbR", g_dec->wb[0]);
+    add("wbG", g_dec->wb[1]);
+    add("wbB", g_dec->wb[2]);
+    add("wbPreset", g_dec->wbPreset);
+    add("curve0", g_dec->curveY[0]);
+    add("curve1", g_dec->curveY[1]);
+    add("curve2", g_dec->curveY[2]);
+    add("curve3", g_dec->curveY[3]);
+    add("curve4", g_dec->curveY[4]);
+    add("cropLeft", g_dec->cropLeft);
+    add("cropTop", g_dec->cropTop);
+    add("cropRight", g_dec->cropRight);
+    add("cropBottom", g_dec->cropBottom);
+    add("rotate", g_dec->rotate);
+    add("jpegQuality", g_dec->jpegQuality);
+    json += "}";
+    g_profileJsonLength = (int)json.size();
+    snprintf(g_profileJson, sizeof(g_profileJson), "%s", json.c_str());
+    return g_profileJson;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int wasm_profile_json_length() { return g_profileJsonLength; }
+
+EMSCRIPTEN_KEEPALIVE
+int wasm_apply_profile_values(const double* values, int count)
+{
+    if (!g_dec || g_dec->id == 0 || !values || count != kProfileValueCount) return 0;
+    EditState state;
+    int i = 0;
+    state.exposure = (float)values[i++];
+    state.black = (int)values[i++];
+    state.white = (int)values[i++];
+    state.contrast = (float)values[i++];
+    state.saturation = (float)values[i++];
+    state.vignette = (int)values[i++];
+    state.clarity = (float)values[i++];
+    state.clarityRadius = (float)values[i++];
+    state.temperature = (int)values[i++];
+    state.tint = (int)values[i++];
+    state.sharpening = (int)values[i++];
+    state.sharpenRadius = (float)values[i++];
+    state.denoise = (int)values[i++];
+    state.vibrance = (int)values[i++];
+    state.ca = (int)values[i++];
+    state.distortion = (int)values[i++];
+    state.shadows = (int)values[i++];
+    state.highlights = (int)values[i++];
+    state.wb[0] = (float)values[i++];
+    state.wb[1] = (float)values[i++];
+    state.wb[2] = (float)values[i++];
+    state.wbPreset = (int)values[i++];
+    for (int curve = 0; curve < 5; ++curve) state.curveY[curve] = (float)values[i++];
+    state.cropLeft = (float)values[i++];
+    state.cropTop = (float)values[i++];
+    state.cropRight = (float)values[i++];
+    state.cropBottom = (float)values[i++];
+    state.rotate = (int)values[i++];
+    state.jpegQuality = (int)values[i++];
+    if (i != kProfileValueCount) return 0;
+    ApplyEditState(state);
+#ifdef __EMSCRIPTEN__
+    ToneMapPreview();
+    g_histDirty = true;
+#endif
+    return 1;
+}
+
 #ifdef __EMSCRIPTEN__
 EM_JS(void, js_request_export, (int imageId, int revision, int fmt, int fullRes, double exp, double black, double white,
                                 double contrast, double sat, double temperature, double tint,
@@ -602,6 +705,14 @@ EM_JS(void, js_request_export, (int imageId, int revision, int fmt, int fullRes,
 
 EM_JS(void, js_select_image, (int imageId), {
     if (window._wasmraw && window._wasmraw.select) window._wasmraw.select(imageId);
+});
+
+EM_JS(void, js_save_profile, (), {
+    if (window._wasmraw && window._wasmraw.saveProfile) window._wasmraw.saveProfile();
+});
+
+EM_JS(void, js_load_profile, (), {
+    if (window._wasmraw && window._wasmraw.loadProfile) window._wasmraw.loadProfile();
 });
 #endif
 
@@ -916,6 +1027,12 @@ static void DrawHistory()
                 ApplyEditState(snapshot.state);
         }
     }
+#ifdef __EMSCRIPTEN__
+    ImGui::Separator();
+    if (ImGui::Button("Save profile")) js_save_profile();
+    ImGui::SameLine();
+    if (ImGui::Button("Load profile")) js_load_profile();
+#endif
     ImGui::End();
 }
 

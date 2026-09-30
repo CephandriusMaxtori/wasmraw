@@ -101,7 +101,7 @@
         pointer-events: none;
       }
       #drop.on { display: block; }
-      #fileInput { display: none; }
+      #fileInput, #profileInput { display: none; }
     </style>
   </head>
   <body>
@@ -116,6 +116,7 @@
     </div>
     <div id="drop">Drop RAW files</div>
     <input type="file" id="fileInput" multiple accept=".raw,.RAW,.cr2,.cr3,.nef,.arw,.dng,.orf,.rw2,.pef,.srw,.raf,.raw,image/*">
+    <input type="file" id="profileInput" accept=".json,.rtprofile,application/json">
 
     <script type='text/javascript'>
       var splashEl = document.getElementById('splash');
@@ -123,6 +124,7 @@
       var progressFill = document.getElementById('progress').firstElementChild;
       var canvasElement = document.getElementById('canvas');
       var inputElement = document.getElementById('fileInput');
+      var profileInput = document.getElementById('profileInput');
       var dropEl = document.getElementById('drop');
       var runtimeReady = false;
       var decodeWorker = null;
@@ -488,12 +490,62 @@
         });
       }
 
+      var profileKeys = [
+        'exposure', 'black', 'white', 'contrast', 'saturation', 'vignette',
+        'clarity', 'clarityRadius', 'temperature', 'tint', 'sharpening',
+        'sharpenRadius', 'denoise', 'vibrance', 'ca', 'distortion', 'shadows',
+        'highlights', 'wbR', 'wbG', 'wbB', 'wbPreset', 'curve0', 'curve1',
+        'curve2', 'curve3', 'curve4', 'cropLeft', 'cropTop', 'cropRight',
+        'cropBottom', 'rotate', 'jpegQuality'
+      ];
+
+      function saveProfile() {
+        if (!Module._wasm_get_profile_json) return;
+        var pointer = Module._wasm_get_profile_json();
+        var length = Module._wasm_profile_json_length();
+        if (!pointer || !length) return;
+        var text = Module.UTF8ToString(pointer, length);
+        var record = findRecord(activeImageId);
+        var baseName = record ? record.name.replace(/\.[^.]+$/, '') : 'rawtherapee';
+        downloadBytes(text, baseName + '.rtprofile.json', 'application/json');
+      }
+
+      function loadProfile() {
+        profileInput.click();
+      }
+
+      function applyProfileText(text) {
+        try {
+          var profile = JSON.parse(text);
+          if (!profile || profile.version !== 1) throw new Error('Unsupported profile version');
+          var values = new Float64Array(profileKeys.length);
+          for (var i = 0; i < profileKeys.length; ++i) {
+            var value = Number(profile[profileKeys[i]]);
+            if (!Number.isFinite(value)) throw new Error('Invalid profile value: ' + profileKeys[i]);
+            values[i] = value;
+          }
+          var pointer = Module._malloc(values.byteLength);
+          try {
+            Module.writeArrayToMemory(values, pointer);
+            if (!Module._wasm_apply_profile_values(pointer, values.length))
+              throw new Error('Profile could not be applied');
+          } finally {
+            Module._free(pointer);
+          }
+          setStatus('Profile loaded');
+        } catch (error) {
+          setStatus('Profile error: ' + error.message, 'err');
+        }
+      }
+
       window._wasmraw = {
         get ready() { return runtimeReady; },
         decode: function (bytes, name) { return loadBytes(bytes, name); },
         select: function (id) { selectImage(id); },
         requestPreview: requestPreview,
-        requestExport: requestExport
+        requestExport: requestExport,
+        saveProfile: saveProfile,
+        loadProfile: loadProfile
       };
 
       canvasElement.addEventListener('webglcontextlost', function (event) {
@@ -546,6 +598,15 @@
       inputElement.addEventListener('change', function () {
         if (inputElement.files && inputElement.files.length) addFiles(inputElement.files);
         inputElement.value = '';
+      });
+      profileInput.addEventListener('change', function () {
+        var file = profileInput.files && profileInput.files[0];
+        profileInput.value = '';
+        if (!file) return;
+        var reader = new FileReader();
+        reader.onload = function (event) { applyProfileText(String(event.target.result)); };
+        reader.onerror = function () { setStatus('Could not read profile', 'err'); };
+        reader.readAsText(file);
       });
 
       var Module = {
