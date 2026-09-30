@@ -1,6 +1,7 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+#include "imgui_internal.h"
 #include "third_party/space_grotesk_data.h"
 #include "tone_common.h"
 #include <GLFW/glfw3.h>
@@ -1071,6 +1072,33 @@ static void SaveUiSettings()
 #endif
 
 // ---------- UI ----------
+// Without this, a first-time visitor gets every window stacked at its default
+// position in the corner. Only runs when no saved layout already owns the node,
+// so an existing localStorage layout is never overwritten.
+static void BuildDefaultLayout(ImGuiID dockspaceId)
+{
+    if (ImGui::DockBuilderGetNode(dockspaceId) != nullptr) return;
+
+    ImGui::DockBuilderRemoveNode(dockspaceId);
+    ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockspaceId, ImGui::GetMainViewport()->WorkSize);
+
+    ImGuiID remaining = dockspaceId;
+    const ImGuiID right = ImGui::DockBuilderSplitNode(remaining, ImGuiDir_Right, 0.30f, nullptr, &remaining);
+    const ImGuiID filmstrip = ImGui::DockBuilderSplitNode(remaining, ImGuiDir_Down, 0.18f, nullptr, &remaining);
+    ImGuiID rightRemaining = right;
+    const ImGuiID toolbox = ImGui::DockBuilderSplitNode(rightRemaining, ImGuiDir_Up, 0.55f, nullptr, &rightRemaining);
+
+    ImGui::DockBuilderDockWindow("Preview", remaining);
+    ImGui::DockBuilderDockWindow("Filmstrip", filmstrip);
+    ImGui::DockBuilderDockWindow("Toolbox", toolbox);
+    ImGui::DockBuilderDockWindow("Navigator", rightRemaining);
+    ImGui::DockBuilderDockWindow("Histogram", rightRemaining);
+    ImGui::DockBuilderDockWindow("History", rightRemaining);
+    ImGui::DockBuilderDockWindow("Status", rightRemaining);
+    ImGui::DockBuilderFinish(dockspaceId);
+}
+
 // Small draggable tone-curve editor; draws into an invisible button.
 static bool CurveEditor(const char* id, float y[5])
 {
@@ -2030,6 +2058,7 @@ static void RenderFrame(GLFWwindow* window)
     ImGui::Begin("HostDockspace", nullptr, hostFlags);
     ImGui::PopStyleVar(2);
     ImGuiID dockspaceId = ImGui::GetID("MainDock");
+    BuildDefaultLayout(dockspaceId);
     ImGui::DockSpace(dockspaceId);
     ImGui::End();
 

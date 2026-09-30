@@ -33,7 +33,8 @@ no server, no uploads, no account. Drop a RAW file in the browser and edit it.
 - **History**: per-image undo/redo and named snapshots, with keyboard shortcuts.
 - **Export**: PNG or JPEG at native or preview resolution, encoded in the worker;
   tone parameters are snapshotted from the current preview state.
-- **Persistent layout**: docked window arrangement is saved to `localStorage`.
+- **Persistent layout**: docked window arrangement is saved to `localStorage`,
+  and a sensible default layout is built on first run.
 - **Menu bar**: File / View / Settings / Help, with import, export, profile
   actions, panel visibility toggles, and an interface settings menu (theme,
   text sizes, font loading, FPS, layout reset).
@@ -116,6 +117,23 @@ The install steps are written to be cache-safe: they clone only when the
 directory is missing, and `emsdk install latest` still upgrades the toolchain
 when a newer release appears, so a stale cache never pins you to old code.
 
+## Testing
+
+Three layers, each covering what the others cannot see:
+
+| Check | Command | Covers |
+| --- | --- | --- |
+| C++ smoke | `powershell -ExecutionPolicy Bypass -File build.ps1 -Smoke` | LibRaw decode, tone math, crop/rotate, blur, mask, export encoders |
+| Browser check | `node tests/browser_check.mjs` | The real page: GL context, worker, C++/JS heap bridge, ImGui runtime |
+
+The browser check loads the built site in headless Chromium, feeds it a
+synthetic DNG, and **fails on any console error**. That last part is the point:
+ImGui reports contract violations through the console instead of throwing, so a
+test that only asserts "no exception" misses them entirely. It writes a
+screenshot and console log to `artifacts/`, and CI uploads both on failure.
+
+Both run in CI on every push to `main`.
+
 ## Layout
 
 ```
@@ -130,6 +148,8 @@ assets/fonts/      Space Grotesk subset + OFL licence + regeneration notes
 tools/              ttf_to_header.py (embeds a font as a C array)
 RawTherapee/        Vendored upstream source (rtengine/libraw used only)
 build.ps1           Build + smoke driver
+tests/              Headless browser check (Playwright)
+package.json        Dev-only dependency (Playwright) for the browser check
 CMakeLists.txt      wasmraw + decoder targets
 smoke/              Headless smoke test (synthetic DNG etc.)
 ```

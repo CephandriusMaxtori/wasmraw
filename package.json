@@ -1,0 +1,11 @@
+{
+  "name": "wasmraw-tools",
+  "private": true,
+  "description": "Browser-side checks for the WasmRaw editor. The C++ smoke test covers the decoder module; this covers the real page.",
+  "scripts": {
+    "browser-check": "node tests/browser_check.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.49.1"
+  }
+}

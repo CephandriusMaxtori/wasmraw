@@ -4,6 +4,9 @@ smoke/smoke.js
 smoke/smoke.data
 smoke/smoke.wasm
 smoke/test.tiff
+node_modules/
+artifacts/
+package-lock.json
 smoke/test.dng
 smoke/demo-scene.dng
 test.tiff

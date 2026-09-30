@@ -71,6 +71,15 @@ jobs:
           restore-keys: |
             ccache-${{ runner.os }}-
 
+      - name: Restore Playwright browsers
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
       - name: Install Emscripten
         run: |
           if [ ! -d "$HOME/emsdk" ]; then
@@ -96,6 +105,7 @@ jobs:
             echo "| emsdk | ${{ steps.cache-emsdk.outputs.cache-hit == 'true' && 'exact hit' || 'restored or miss' }} |"
             echo "| imgui | ${{ steps.cache-imgui.outputs.cache-hit == 'true' && 'exact hit' || 'restored or miss' }} |"
             echo "| ccache | ${{ steps.cache-ccache.outputs.cache-hit == 'true' && 'exact hit' || 'restored or miss' }} |"
+            echo "| playwright | ${{ steps.cache-playwright.outputs.cache-hit == 'true' && 'exact hit' || 'restored or miss' }} |"
             echo ""
             echo "Emscripten: \`$EMSDK_VERSION\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -133,6 +143,35 @@ jobs:
             cat ../smoke-log.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # The smoke test above calls the decoder module directly, so it cannot see
+      # the GL context, the worker, the C++/JS heap bridge, or ImGui's own
+      # runtime assertions. This loads the real page in headless Chromium and
+      # fails on any console error, which is how the PushFont and heap-export
+      # bugs were caught.
+      - name: Run browser check
+        run: |
+          set -o pipefail
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          node tests/browser_check.mjs build-wasm smoke/test.dng 2>&1 | tee browser-log.txt
+          {
+            echo "## Browser check"
+            echo '```'
+            cat browser-log.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload browser artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmraw-browser-check
+          path: |
+            artifacts/
+            browser-log.txt
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
