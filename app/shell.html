@@ -441,8 +441,14 @@ var fontInput = document.getElementById('fontInput');
 
       // The subject mask lives in the WASM heap; copy it out so it can be
       // transferred to the worker without keeping a view on that memory.
+      // A missing heap view must degrade to "no mask" rather than throw and
+      // take the preview loop down with it.
       function copyMask(maskPtr, maskSize) {
         if (!maskPtr || !maskSize) return null;
+        if (!Module.HEAPU8) {
+          setStatus('Subject mask unavailable: runtime heap view is missing', 'err');
+          return null;
+        }
         return new Uint8Array(Module.HEAPU8.buffer, maskPtr, maskSize).slice().buffer;
       }
 
