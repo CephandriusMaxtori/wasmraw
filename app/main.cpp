@@ -618,6 +618,23 @@ static float g_menuFontSize = 16.0f;
 static bool g_fontDirty = true;
 static ImFont* g_uiFont = nullptr;
 static ImFont* g_menuFont = nullptr;
+static bool g_lightTheme = false;
+static bool g_showFps = false;
+static bool g_themeDirty = true;
+static bool g_layoutResetPending = false;
+
+// Interface settings live in the Settings menu and are mirrored to
+// localStorage, so a reload keeps the look the user picked.
+static void ApplyTheme()
+{
+    if (g_lightTheme) ImGui::StyleColorsLight();
+    else ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 4.0f;
+    style.FrameRounding = 3.0f;
+    style.GrabRounding = 3.0f;
+    style.WindowBorderSize = 1.0f;
+}
 
 // Space Grotesk backs the menu bar. It is bundled as a byte array so the build
 // stays self-contained; see assets/fonts/OFL.txt for the licence.
@@ -691,6 +708,17 @@ void wasm_set_font_sizes(float ui, float menu)
 {
     g_fontSize = std::clamp(ui, 8.0f, 48.0f);
     g_menuFontSize = std::clamp(menu, 8.0f, 48.0f);
+    g_fontDirty = true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void wasm_apply_ui_settings(int lightTheme, double fontSize, double menuFontSize, int showFps)
+{
+    g_lightTheme = lightTheme != 0;
+    g_fontSize = std::clamp((float)fontSize, 8.0f, 48.0f);
+    g_menuFontSize = std::clamp((float)menuFontSize, 8.0f, 48.0f);
+    g_showFps = showFps != 0;
+    g_themeDirty = true;
     g_fontDirty = true;
 }
 
@@ -929,6 +957,10 @@ EM_JS(void, js_open_font_dialog, (), {
 EM_JS(void, js_forget_font, (), {
     if (window._wasmraw && window._wasmraw.forgetFont) window._wasmraw.forgetFont();
 });
+
+EM_JS(void, js_forget_layout, (), {
+    if (window._wasmraw && window._wasmraw.forgetLayout) window._wasmraw.forgetLayout();
+});
 #endif
 
 static void RequestExport(int format)
@@ -1018,6 +1050,32 @@ static void RestoreLayoutFromStorage()
     static char s_buffer[256 * 1024];
     int len = js_get_layout(s_buffer, sizeof(s_buffer));
     if (len > 0) ImGui::LoadIniSettingsFromMemory(s_buffer, (size_t)len);
+}
+
+EM_JS(void, js_set_ui_settings, (const char* src), {
+    try {
+        localStorage.setItem('wasmraw.settings', UTF8ToString(src));
+    } catch (e) { /* quota / privacy mode: ignore */ }
+});
+
+EM_JS(int, js_get_ui_settings, (char* dst, int maxlen), {
+    try {
+        var s = localStorage.getItem('wasmraw.settings');
+        if (!s) return 0;
+        if (s.length >= maxlen) s = s.substr(0, maxlen - 1);
+        stringToUTF8(s, dst, maxlen);
+        return s.length;
+    } catch (e) { return 0; }
+});
+
+static void SaveUiSettings()
+{
+    char json[256];
+    snprintf(json, sizeof(json),
+             "{\"version\":1,\"lightTheme\":%d,\"fontSize\":%.1f,\"menuFontSize\":%.1f,"
+             "\"showFps\":%d}",
+             g_lightTheme ? 1 : 0, g_fontSize, g_menuFontSize, g_showFps ? 1 : 0);
+    js_set_ui_settings(json);
 }
 #endif
 
@@ -1507,37 +1565,6 @@ static void DrawToolbox()
         ImGui::TextDisabled("Paint over the subject; everything else is blurred");
     }
 
-    ImGui::Separator();
-    ImGui::TextUnformatted("Interface font");
-    float uiSize = g_fontSize;
-    if (ImGui::SliderFloat("Panel text size", &uiSize, 10.0f, 24.0f, "%.0f px") &&
-        uiSize != g_fontSize) {
-        g_fontSize = uiSize;
-        g_fontDirty = true;
-    }
-    float menuSize = g_menuFontSize;
-    if (ImGui::SliderFloat("Menu text size", &menuSize, 10.0f, 28.0f, "%.0f px") &&
-        menuSize != g_menuFontSize) {
-        g_menuFontSize = menuSize;
-        g_fontDirty = true;
-    }
-    if (ImGui::Button("Load font...")) {
-#ifdef __EMSCRIPTEN__
-        js_open_font_dialog();
-#endif
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Reset to default")) {
-        g_fontData.clear();
-        g_fontName = "Default";
-        g_fontSize = 15.0f;
-        g_fontDirty = true;
-#ifdef __EMSCRIPTEN__
-        js_forget_font();
-#endif
-    }
-    ImGui::TextDisabled("Panels: %s | Menus: Space Grotesk", g_fontName.c_str());
-
     bool hasImage = g_dec->loaded && g_dec->pw > 0;
     ImGui::Separator();
     ImGui::TextUnformatted("Export");
@@ -1798,7 +1825,7 @@ static void DrawStatus()
         ImGui::Text("EV %+.2f  Black %d  White %d  Contrast %.0f  Sat %.0f",
                     g_dec->exposure, g_dec->black, g_dec->white, g_dec->contrast, g_dec->saturation);
     }
-    ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+    if (g_showFps) ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
     ImGui::End();
 }
 
@@ -1907,6 +1934,55 @@ static void DrawMainMenuBar()
         ImGui::EndMenu();
     }
 
+    if (ImGui::BeginMenu("Settings")) {
+        if (ImGui::MenuItem("Light theme", nullptr, g_lightTheme)) {
+            g_themeDirty = true;
+            SaveUiSettings();
+        }
+        ImGui::Separator();
+
+        float uiSize = g_fontSize;
+        if (ImGui::SliderFloat("Panel text size", &uiSize, 10.0f, 24.0f, "%.0f px")) {
+            if (uiSize != g_fontSize) {
+                g_fontSize = uiSize;
+                g_fontDirty = true;
+                SaveUiSettings();
+            }
+        }
+        float menuSize = g_menuFontSize;
+        if (ImGui::SliderFloat("Menu text size", &menuSize, 10.0f, 28.0f, "%.0f px")) {
+            if (menuSize != g_menuFontSize) {
+                g_menuFontSize = menuSize;
+                g_fontDirty = true;
+                SaveUiSettings();
+            }
+        }
+        if (ImGui::MenuItem("Load font...")) {
+#ifdef __EMSCRIPTEN__
+            js_open_font_dialog();
+#endif
+        }
+        if (ImGui::MenuItem("Reset font to default")) {
+            g_fontData.clear();
+            g_fontName = "Default";
+            g_fontSize = 15.0f;
+            g_fontDirty = true;
+            SaveUiSettings();
+#ifdef __EMSCRIPTEN__
+            js_forget_font();
+#endif
+        }
+        ImGui::TextDisabled("Panels: %s", g_fontName.c_str());
+        ImGui::Separator();
+
+        if (ImGui::MenuItem("Show FPS", nullptr, g_showFps)) SaveUiSettings();
+        if (ImGui::MenuItem("Reset panel layout")) {
+            // Deferred: tearing down a dock node is not safe mid-frame.
+            g_layoutResetPending = true;
+        }
+        ImGui::EndMenu();
+    }
+
     if (ImGui::BeginMenu("Help")) {
         if (ImGui::MenuItem("Import images")) g_showToolbox = true;
         ImGui::Separator();
@@ -1931,7 +2007,15 @@ static void RenderFrame(GLFWwindow* window)
     ApplyDisplayScale(); // layout in CSS px, framebuffer at devicePixelRatio
 #endif
     // The font atlas may only be rebuilt between frames.
+    if (g_layoutResetPending) {
+        g_layoutResetPending = false;
+        ImGui::LoadIniSettingsFromMemory("");
+#ifdef __EMSCRIPTEN__
+        js_forget_layout();
+#endif
+    }
     if (g_fontDirty) ApplyFontAtlas();
+    if (g_themeDirty) { ApplyTheme(); g_themeDirty = false; }
     ImGui::NewFrame();
     g_controlHovered = false;    HandleShortcuts();
 
@@ -2067,6 +2151,9 @@ int main()
     style.WindowRounding = 4.0f;
     style.FrameRounding = 3.0f;
     style.GrabRounding = 3.0f;
+    // The shell restores theme/sizes at runtime init; the first frame picks
+    // them up via g_themeDirty rather than flashing the default look.
+    ApplyTheme();
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 300 es");

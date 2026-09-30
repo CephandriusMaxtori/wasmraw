@@ -573,6 +573,28 @@ var fontInput = document.getElementById('fontInput');
       function forgetFont() {
         try { localStorage.removeItem('wasmraw.fontData'); } catch (e) {}
       }
+      function forgetLayout() {
+        try { localStorage.removeItem('wasmraw-imgui-ini'); } catch (e) {}
+      }
+
+      // Interface settings (theme, text sizes, FPS) are stored as a small flat
+      // JSON blob. Parsing here keeps the C++ side free of a JSON dependency.
+      function restoreUiSettings() {
+        var stored;
+        try { stored = localStorage.getItem('wasmraw.settings'); } catch (e) { return; }
+        if (!stored) return;
+        try {
+          var parsed = JSON.parse(stored);
+          if (!parsed || parsed.version !== 1) return;
+          if (Module._wasm_apply_ui_settings) {
+            Module._wasm_apply_ui_settings(
+              parsed.lightTheme ? 1 : 0,
+              Number(parsed.fontSize) || 15,
+              Number(parsed.menuFontSize) || 16,
+              parsed.showFps ? 1 : 0);
+          }
+        } catch (e) { /* fall back to defaults */ }
+      }
 
       // A font face is a few hundred KB at most, so keeping it in localStorage
       // means the choice survives a reload instead of prompting again.
@@ -641,7 +663,8 @@ var fontInput = document.getElementById('fontInput');
           loadProfile: loadProfile,
           openFileDialog: openFileDialog,
           openFontDialog: openFontDialog,
-          forgetFont: forgetFont
+          forgetFont: forgetFont,
+          forgetLayout: forgetLayout
         };
 
       canvasElement.addEventListener('webglcontextlost', function (event) {
@@ -740,6 +763,7 @@ var fontInput = document.getElementById('fontInput');
           console.log('wasmraw: runtime initialized');
           setStatus('Ready - drop RAW files, double-click, or press Ctrl+O');
           restoreFont();
+          restoreUiSettings();
           try {
             if (typeof Worker === 'undefined') throw new Error('Worker API unavailable');
             decodeWorker = new Worker('decoder-worker.js?build=' + encodeURIComponent(buildId()));

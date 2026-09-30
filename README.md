@@ -34,8 +34,9 @@ no server, no uploads, no account. Drop a RAW file in the browser and edit it.
 - **Export**: PNG or JPEG at native or preview resolution, encoded in the worker;
   tone parameters are snapshotted from the current preview state.
 - **Persistent layout**: docked window arrangement is saved to `localStorage`.
-- **Menu bar**: File / View / Help, with panel visibility toggles and import,
-  export, and profile actions.
+- **Menu bar**: File / View / Settings / Help, with import, export, profile
+  actions, panel visibility toggles, and an interface settings menu (theme,
+  text sizes, font loading, FPS, layout reset).
 - **Interface font**: the menu bar uses the bundled Space Grotesk; panel text can
   be switched to any local `.ttf`/`.otf` and both sizes are adjustable.
 - **Two WebAssembly modules**: `wasmraw` (UI) + `decoder` (worker decoding/export) -
