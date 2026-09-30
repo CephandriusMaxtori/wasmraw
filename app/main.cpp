@@ -695,15 +695,6 @@ void wasm_set_font_name(const char* name)
 }
 
 EMSCRIPTEN_KEEPALIVE
-int wasm_reset_font()
-{
-    g_fontData.clear();
-    g_fontName = "Default";
-    g_fontDirty = true;
-    return 1;
-}
-
-EMSCRIPTEN_KEEPALIVE
 void wasm_set_font_sizes(float ui, float menu)
 {
     g_fontSize = std::clamp(ui, 8.0f, 48.0f);
@@ -1749,7 +1740,10 @@ static void DrawPreview()
     if (g_dec->loaded && g_dec->blurAmount > 0) {
         const float fx = tlx + g_dec->blurFocusX * iw;
         const float fy = tly + g_dec->blurFocusY * ih;
-        dl->AddCircle(ImVec2(fx, fy), 7.0f, IM_COL32(255, 255, 255, 210), 0, 1.0f);
+        // A dark halo under the light ring keeps the marker readable over both
+        // blown-out highlights and deep shadows, independent of the theme.
+        dl->AddCircle(ImVec2(fx, fy), 8.0f, IM_COL32(0, 0, 0, 150), 0, 2.5f);
+        dl->AddCircle(ImVec2(fx, fy), 7.0f, IM_COL32(255, 255, 255, 220), 0, 1.0f);
         dl->AddCircleFilled(ImVec2(fx, fy), 2.5f, IM_COL32(255, 220, 80, 240));
     }
     if (g_dec->maskEnabled && !g_dec->mask.empty()) {
@@ -1779,8 +1773,10 @@ static void DrawPreview()
             const float u = std::clamp((mouse.x - tlx) / iw, 0.0f, 1.0f);
             const float v = std::clamp((mouse.y - tly) / ih, 0.0f, 1.0f);
             const float brush = (float)g_dec->brushSize / (float)std::max(g_texW, g_texH);
-            dl->AddCircle(ImVec2(tlx + u * iw, tly + v * ih), std::max(2.0f, brush * iw),
-                          IM_COL32(255, 255, 255, 200), 0, 1.5f);
+            const float radius = std::max(2.0f, brush * iw);
+            const ImVec2 cursor(tlx + u * iw, tly + v * ih);
+            dl->AddCircle(cursor, radius + 1.5f, IM_COL32(0, 0, 0, 150), 0, 3.0f);
+            dl->AddCircle(cursor, radius, IM_COL32(255, 255, 255, 220), 0, 1.5f);
         }
     }
 
