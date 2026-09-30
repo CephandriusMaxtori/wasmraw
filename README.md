@@ -102,9 +102,15 @@ deploys to Pages. Three caches keep repeat runs fast:
 
 | Cache | Contents | Invalidated by |
 | --- | --- | --- |
-| `emsdk` | Installed Emscripten toolchain (~1.5 GB) | Workflow or `CMakeLists.txt` change |
+| `emsdk` | Pinned Emscripten toolchain (~1.5 GB) | `EMSDK_VERSION` bump only |
 | `imgui` | Dear ImGui `docking` checkout | `imgui` branch moves |
 | `ccache` | Compiled LibRaw objects | `decoder.cpp`, `tone_common.h`, `third_party/` |
+
+The emsdk cache is keyed on the pinned `EMSDK_VERSION` rather than on our build
+config on purpose: hashing `CMakeLists.txt` would re-download the whole toolchain
+on every build-flag change, which is what made runs jump from ~1.5 min to tens of
+minutes. Each run also reports its cache hits in the job summary, so a slow run
+tells you which cache missed.
 
 The install steps are written to be cache-safe: they clone only when the
 directory is missing, and `emsdk install latest` still upgrades the toolchain

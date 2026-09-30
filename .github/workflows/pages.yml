@@ -11,6 +11,11 @@ permissions:
   pages: write
   id-token: write
 
+env:
+  # Pinned so the toolchain is reproducible and the cache key is stable.
+  # Bump this to pick up a new Emscripten release; it is the only line to change.
+  EMSDK_VERSION: '6.0.10'
+
 concurrency:
   group: github-pages
   cancel-in-progress: false
@@ -40,14 +45,16 @@ jobs:
           sudo apt-get install -y ninja-build ccache
 
       - name: Restore Emscripten cache
+        id: cache-emsdk
         uses: actions/cache@v4
         with:
           path: ~/emsdk
-          key: emsdk-${{ runner.os }}-${{ hashFiles('.github/workflows/pages.yml', 'CMakeLists.txt') }}
+          key: emsdk-${{ runner.os }}-${{ env.EMSDK_VERSION }}
           restore-keys: |
             emsdk-${{ runner.os }}-
 
       - name: Restore ImGui cache
+        id: cache-imgui
         uses: actions/cache@v4
         with:
           path: ~/imgui
@@ -56,6 +63,7 @@ jobs:
             imgui-${{ runner.os }}-
 
       - name: Restore ccache
+        id: cache-ccache
         uses: actions/cache@v4
         with:
           path: ~/.cache/ccache
@@ -68,8 +76,8 @@ jobs:
           if [ ! -d "$HOME/emsdk" ]; then
             git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
           fi
-          "$HOME/emsdk/emsdk" install latest
-          "$HOME/emsdk/emsdk" activate latest
+          "$HOME/emsdk/emsdk" install "$EMSDK_VERSION"
+          "$HOME/emsdk/emsdk" activate "$EMSDK_VERSION"
           echo "EMSDK=$HOME/emsdk" >> "$GITHUB_ENV"
 
       - name: Install Dear ImGui
@@ -77,6 +85,20 @@ jobs:
           if [ ! -d "$HOME/imgui/.git" ]; then
             git clone --depth 1 --branch docking https://github.com/ocornut/imgui.git "$HOME/imgui"
           fi
+
+      - name: Report cache status
+        run: |
+          {
+            echo "## Caches"
+            echo ""
+            echo "| Cache | Result |"
+            echo "| --- | --- |"
+            echo "| emsdk | ${{ steps.cache-emsdk.outputs.cache-hit == 'true' && 'exact hit' || 'restored or miss' }} |"
+            echo "| imgui | ${{ steps.cache-imgui.outputs.cache-hit == 'true' && 'exact hit' || 'restored or miss' }} |"
+            echo "| ccache | ${{ steps.cache-ccache.outputs.cache-hit == 'true' && 'exact hit' || 'restored or miss' }} |"
+            echo ""
+            echo "Emscripten: \`$EMSDK_VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Configure CMake
         run: |
