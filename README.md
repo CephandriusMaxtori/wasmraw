@@ -1,5 +1,7 @@
 # RawTherapee ImGui WASM
 
+[![Build WASM and deploy Pages](https://github.com/CephandriusMaxtori/wasmraw/actions/workflows/pages.yml/badge.svg)](https://github.com/CephandriusMaxtori/wasmraw/actions/workflows/pages.yml)
+
 A browser-native raw photo editor port of [RawTherapee](https://www.rawtherapee.com/),
 built with Dear ImGui, LibRaw, and WebAssembly (Emscripten). Entirely client-side:
 no server, no uploads, no account. Drop a RAW file in the browser and edit it.
