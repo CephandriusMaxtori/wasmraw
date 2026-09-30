@@ -9,4 +9,4 @@ artifacts/
 package-lock.json
 smoke/test.dng
 smoke/demo-scene.dng
-test.tiff
+test.tifftest.dng
