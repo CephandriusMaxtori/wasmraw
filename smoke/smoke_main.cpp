@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 extern "C" int dec_decode(const unsigned char* buf, int len);
 extern "C" const float* dec_preview_ptr();
@@ -17,7 +18,7 @@ extern "C" int dec_render_preview(double exposure, double black, double white,
                                  double ca, double distortion, double shadows, double highlights,
                                  double cy0, double cy1, double cy2, double cy3, double cy4,
                                  double cropLeft, double cropTop, double cropRight, double cropBottom,
-                                 int rotate, int quality);
+                                 int rotate, int quality, double blurAmount, double blurFocusX, double blurFocusY, double blurRange);
 extern "C" const unsigned char* dec_rendered_preview_ptr();
 extern "C" size_t dec_rendered_preview_size();
 extern "C" int dec_rendered_preview_width();
@@ -30,7 +31,7 @@ extern "C" int dec_export_write(double exposure, double black, double white,
                                  double ca, double distortion, double shadows, double highlights,
                                  double cy0, double cy1, double cy2, double cy3, double cy4,
                                  double cropLeft, double cropTop, double cropRight, double cropBottom,
-                                 int rotate, int fullRes, int format, int quality);
+                                 int rotate, int fullRes, int format, int quality, double blurAmount, double blurFocusX, double blurFocusY, double blurRange);
 extern "C" size_t dec_export_size();
 extern "C" const unsigned char* dec_export_data();
 extern "C" int dec_has_fullres();
@@ -82,7 +83,7 @@ int main(int argc, char** argv)
                                           0.2, 2.0, 0.2, 1.0, 0.1, 0.2,
                                           0.1, 0.1, 0.2, 0.1,
                                                    0.0, 0.25, 0.5, 0.75, 1.0,
-                                                   0.0, 0.0, 1.0, 1.0, 0, 1);
+                                                   0.0, 0.0, 1.0, 1.0, 0, 1, 0, 0.5, 0.5, 0.35);
         size_t renderedSize = dec_rendered_preview_size();
         bool renderedOk = rendered && dec_rendered_preview_ptr() &&
                           dec_rendered_preview_width() == pw &&
@@ -99,7 +100,7 @@ int main(int argc, char** argv)
                                                   0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
                                                   0.0, 0.0, 0.0, 0.0,
                                                   0.0, 0.25, 0.5, 0.75, 1.0,
-                                           0.0, 0.0, 1.0, 1.0, 0, 1);
+                                            0.0, 0.0, 1.0, 1.0, 0, 1, 0, 0.5, 0.5, 0.35);
         const unsigned char* exposurePtr = dec_rendered_preview_ptr();
         bool exposureChanged = false;
         if (baseline && exposurePtr) {
@@ -116,7 +117,7 @@ int main(int argc, char** argv)
                                           0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
                                           0.0, 0.0, 0.0, 0.0,
                                           0.0, 0.25, 0.5, 0.75, 1.0,
-                                          0.0, 0.0, 1.0, 1.0, 90, 1);
+                                          0.0, 0.0, 1.0, 1.0, 90, 1, 0, 0.5, 0.5, 0.35);
         bool rotateOk = rotated && dec_rendered_preview_width() == ph &&
                         dec_rendered_preview_height() == pw &&
                         dec_rendered_preview_size() == (size_t)ph * pw * 4;
@@ -128,19 +129,54 @@ int main(int argc, char** argv)
                                          0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
                                          0.0, 0.0, 0.0, 0.0,
                                          0.0, 0.25, 0.5, 0.75, 1.0,
-                                         0.25, 0.25, 0.75, 0.75, 0, 1);
+                                          0.25, 0.25, 0.75, 0.75, 0, 1, 0, 0.5, 0.5, 0.35);
         bool cropOk = cropped && dec_rendered_preview_width() == 32 &&
                       dec_rendered_preview_height() == 24 &&
                       dec_rendered_preview_size() == (size_t)32 * 24 * 4;
         printf("PREVIEW-CROP ok=%d\n", cropOk ? 1 : 0);
         if (!cropOk) r = 1;
 
+        int sharpAgain = dec_render_preview(0.0, 0.0, 1.0, 0.0, 1.0,
+                                           0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
+                                           0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
+                                           0.0, 0.0, 0.0, 0.0,
+                                           0.0, 0.25, 0.5, 0.75, 1.0,
+                                           0.0, 0.0, 1.0, 1.0, 0, 1, 0, 0.5, 0.5, 0.35);
+        size_t blurSize = dec_rendered_preview_size();
+        const unsigned char* blurPtr = dec_rendered_preview_ptr();
+        bool blurOk = sharpAgain && blurSize == (size_t)pw * ph * 4 && blurPtr;
+        if (blurOk) {
+            std::vector<unsigned char> sharp(blurSize);
+            memcpy(sharp.data(), blurPtr, blurSize);
+            int blurred = dec_render_preview(0.0, 0.0, 1.0, 0.0, 1.0,
+                                             0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
+                                             0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
+                                             0.0, 0.0, 0.0, 0.0,
+                                             0.0, 0.25, 0.5, 0.75, 1.0,
+                                             0.0, 0.0, 1.0, 1.0, 0, 1, 1.0, 0.5, 0.5, 0.35);
+            const unsigned char* blurredPtr = dec_rendered_preview_ptr();
+            if (!blurred || !blurredPtr || dec_rendered_preview_size() != blurSize) {
+                blurOk = false;
+            } else {
+                int cornerDelta = 0, centerDelta = 0;
+                const size_t centerIndex = ((size_t)(ph / 2) * pw + (size_t)(pw / 2)) * 4;
+                for (int c = 0; c < 3; ++c) {
+                    cornerDelta += abs((int)blurredPtr[c] - (int)sharp[c]);
+                    centerDelta += abs((int)blurredPtr[centerIndex + c] - (int)sharp[centerIndex + c]);
+                }
+                // The focus point stays sharp while the far corner gets blurred.
+                blurOk = cornerDelta > centerDelta;
+            }
+        }
+        printf("PREVIEW-BLUR ok=%d size=%u\n", blurOk ? 1 : 0, (unsigned)blurSize);
+        if (!blurOk) r = 1;
+
         int okPng = dec_export_write(0.0, 0.0, 1.0, 0.0, 1.0,
                                      0.0, 0.0, 1.0, 1.0, 1.0, 0.25,
                                      0.3, 2.0, 0.2, 1.0, 0.1, 0.0,
                                      0.0, 0.0, 0.2, 0.1,
                                            0.0, 0.25, 0.5, 0.75, 1.0,
-                                           0.0, 0.0, 1.0, 1.0, 0, 1, 0, 0);
+                                            0.0, 0.0, 1.0, 1.0, 0, 1, 0, 0, 0, 0.5, 0.5, 0.35);
         size_t pngSz = dec_export_size();
         const unsigned char* png = dec_export_data();
         bool pngOk = okPng && pngSz > 0 && png && memcmp(png, kPngMagic, 8) == 0;
@@ -152,7 +188,7 @@ int main(int argc, char** argv)
                                      0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
                                      0.0, 0.0, -0.2, -0.1,
                                            0.0, 0.25, 0.5, 0.75, 1.0,
-                                           0.0, 0.0, 1.0, 1.0, 0, 1, 1, 90);
+                                            0.0, 0.0, 1.0, 1.0, 0, 1, 1, 90, 0, 0.5, 0.5, 0.35);
         size_t jpgSz = dec_export_size();
         const unsigned char* jpg = dec_export_data();
         bool jpgOk = okJpg && jpgSz > 0 && jpg && jpg[0] == 0xFF && jpg[1] == 0xD8;
@@ -165,7 +201,7 @@ int main(int argc, char** argv)
                                         0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
                                         0.0, 0.0, 0.0, 0.0,
                                               0.0, 0.25, 0.5, 0.75, 1.0,
-                                              0.0, 0.0, 1.0, 1.0, 0, 1, 0, 0);
+                                              0.0, 0.0, 1.0, 1.0, 0, 1, 0, 0, 0, 0.5, 0.5, 0.35);
         size_t nativeSz = dec_export_size();
         const unsigned char* native = dec_export_data();
         bool nativeOk = fullResAvail

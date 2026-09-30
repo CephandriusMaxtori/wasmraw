@@ -83,6 +83,7 @@ jobs:
           cp build-wasm/wasmraw.html pages/index.html
           cp build-wasm/wasmraw.html build-wasm/wasmraw.js build-wasm/wasmraw.wasm pages/
           cp build-wasm/decoder.js build-wasm/decoder.wasm build-wasm/decoder-worker.js pages/
+          cp logo.svg pages/logo.svg
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

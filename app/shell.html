@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="icon" href="data:,">
+    <link rel="icon" type="image/svg+xml" href="logo.svg">
     <title>RawTherapee WASM</title>
     <style>
       html, body {
@@ -442,7 +442,7 @@
                               clarity, clarityRadius, sharpening, sharpenRadius,
                               denoise, vibrance, ca, distortion, shadows, highlights,
                               cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom,
-                              rotate, quality) {
+                              rotate, quality, blurAmount, blurFocusX, blurFocusY, blurRange) {
         var record = findRecord(imageId);
         if (!record || !decodeWorker) return;
         record.revision = revision;
@@ -458,7 +458,11 @@
           cy0: cy0, cy1: cy1, cy2: cy2, cy3: cy3, cy4: cy4,
           cropLeft: cropLeft, cropTop: cropTop, cropRight: cropRight, cropBottom: cropBottom,
           rotate: rotate || 0,
-          quality: quality === undefined ? 1 : quality
+          quality: quality === undefined ? 1 : quality,
+          blurAmount: blurAmount || 0,
+          blurFocusX: blurFocusX === undefined ? 0.5 : blurFocusX,
+          blurFocusY: blurFocusY === undefined ? 0.5 : blurFocusY,
+          blurRange: blurRange === undefined ? 0.35 : blurRange
         };
         record.lastPreview = pendingPreview;
         record.previewRequestId = pendingPreview.requestId;
@@ -477,7 +481,7 @@
                              clarity, clarityRadius, sharpening, sharpenRadius,
                              denoise, vibrance, ca, distortion, shadows, highlights,
                              cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom,
-                             rotate, quality) {
+                             rotate, quality, blurAmount, blurFocusX, blurFocusY, blurRange) {
         if (!decodeWorker) return;
         if (activeWorkerImageId !== imageId) {
           updateRecordStatus(imageId, 'Select image before exporting');
@@ -494,7 +498,11 @@
           cy0: cy0, cy1: cy1, cy2: cy2, cy3: cy3, cy4: cy4,
           cropLeft: cropLeft, cropTop: cropTop, cropRight: cropRight, cropBottom: cropBottom,
           rotate: rotate || 0,
-          quality: Math.floor(quality)
+          quality: Math.floor(quality),
+          blurAmount: blurAmount || 0,
+          blurFocusX: blurFocusX === undefined ? 0.5 : blurFocusX,
+          blurFocusY: blurFocusY === undefined ? 0.5 : blurFocusY,
+          blurRange: blurRange === undefined ? 0.35 : blurRange
         });
       }
 
@@ -504,7 +512,8 @@
         'sharpenRadius', 'denoise', 'vibrance', 'ca', 'distortion', 'shadows',
         'highlights', 'wbR', 'wbG', 'wbB', 'wbPreset', 'curve0', 'curve1',
         'curve2', 'curve3', 'curve4', 'cropLeft', 'cropTop', 'cropRight',
-        'cropBottom', 'rotate', 'jpegQuality'
+        'cropBottom', 'rotate', 'jpegQuality', 'blurAmount', 'blurFocusX',
+        'blurFocusY', 'blurRange'
       ];
 
       function saveProfile() {

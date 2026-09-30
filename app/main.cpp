@@ -45,6 +45,10 @@ struct EditState {
     float cropBottom = 1.0f;
     int rotate = 0;
     int jpegQuality = 90;
+    int blurAmount = 0;
+    float blurFocusX = 0.5f;
+    float blurFocusY = 0.5f;
+    float blurRange = 0.35f;
 };
 
 struct HistoryEntry {
@@ -102,6 +106,7 @@ static std::deque<ImageDocument> g_images;
 static ImageDocument g_empty;
 static ImageDocument* g_dec = &g_empty;
 static bool g_wbPicking = false;
+static bool g_dofPicking = false;
 static bool g_skipHistory = false;
 static bool g_controlHovered = false;
 static bool g_controlChanged = false;
@@ -129,6 +134,8 @@ static bool EditStateEqual(const EditState& a, const EditState& b)
            a.cropLeft == b.cropLeft && a.cropTop == b.cropTop &&
            a.cropRight == b.cropRight && a.cropBottom == b.cropBottom &&
            a.rotate == b.rotate &&
+           a.blurAmount == b.blurAmount && a.blurFocusX == b.blurFocusX &&
+           a.blurFocusY == b.blurFocusY && a.blurRange == b.blurRange &&
            a.wb[0] == b.wb[0] && a.wb[1] == b.wb[1] && a.wb[2] == b.wb[2] &&
            a.curveY[0] == b.curveY[0] && a.curveY[1] == b.curveY[1] &&
            a.curveY[2] == b.curveY[2] && a.curveY[3] == b.curveY[3] &&
@@ -165,7 +172,7 @@ static ImVec2 g_previewContentSize(0.0f, 0.0f);
 static std::vector<unsigned char> g_rgba;
 static char g_exportStatus[160] = "";
 static const int kPreviewMaxDim = 1600;
-static const int kProfileValueCount = 33;
+static const int kProfileValueCount = 37;
 static char g_profileJson[4096] = {0};
 static int g_profileJsonLength = 0;
 
@@ -350,6 +357,10 @@ static tone::Params CurrentToneParams()
     p.cropRight = g_dec->cropRight;
     p.cropBottom = g_dec->cropBottom;
     p.rotate = g_dec->rotate;
+    p.blurAmount = (float)g_dec->blurAmount / 100.0f;
+    p.blurFocusX = g_dec->blurFocusX;
+    p.blurFocusY = g_dec->blurFocusY;
+    p.blurRange = g_dec->blurRange;
     return p;
 }
 
@@ -472,12 +483,15 @@ EM_JS(void, js_request_preview, (int imageId, int revision,
                                   double ca, double distortion, double shadows, double highlights,
                                   double cy0, double cy1, double cy2, double cy3, double cy4,
                                   double cropLeft, double cropTop, double cropRight, double cropBottom,
-                                  int rotate, int quality), {
+                                  int rotate, int quality,
+                                  double blurAmount, double blurFocusX, double blurFocusY,
+                                  double blurRange), {
     if (!window._wasmraw || !window._wasmraw.requestPreview) return;
     window._wasmraw.requestPreview(imageId, revision, exp, black, white, contrast, sat,
         temperature, tint, wbR, wbG, wbB, vignette, clarity, clarityRadius,
         sharpening, sharpenRadius, denoise, vibrance, ca, distortion, shadows, highlights,
-        cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom, rotate, quality);
+        cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom, rotate, quality,
+        blurAmount, blurFocusX, blurFocusY, blurRange);
 });
 #endif
 
@@ -507,7 +521,9 @@ static void RequestPreview()
                        (double)g_dec->highlights / 100.0,
                        g_dec->curveY[0], g_dec->curveY[1], g_dec->curveY[2], g_dec->curveY[3], g_dec->curveY[4],
                        g_dec->cropLeft, g_dec->cropTop, g_dec->cropRight, g_dec->cropBottom,
-                       g_dec->rotate, 0);
+                       g_dec->rotate, 0,
+                       (double)g_dec->blurAmount / 100.0,
+                       g_dec->blurFocusX, g_dec->blurFocusY, g_dec->blurRange);
 #else
     g_previewDirty = true;
 #endif
@@ -691,6 +707,10 @@ const char* wasm_get_profile_json()
     add("cropBottom", g_dec->cropBottom);
     add("rotate", g_dec->rotate);
     add("jpegQuality", g_dec->jpegQuality);
+    add("blurAmount", g_dec->blurAmount);
+    add("blurFocusX", g_dec->blurFocusX);
+    add("blurFocusY", g_dec->blurFocusY);
+    add("blurRange", g_dec->blurRange);
     json += "}";
     g_profileJsonLength = (int)json.size();
     snprintf(g_profileJson, sizeof(g_profileJson), "%s", json.c_str());
@@ -735,6 +755,10 @@ int wasm_apply_profile_values(const double* values, int count)
     state.cropBottom = (float)values[i++];
     state.rotate = (int)values[i++];
     state.jpegQuality = (int)values[i++];
+    state.blurAmount = std::clamp((int)values[i++], 0, 100);
+    state.blurFocusX = std::clamp((float)values[i++], 0.0f, 1.0f);
+    state.blurFocusY = std::clamp((float)values[i++], 0.0f, 1.0f);
+    state.blurRange = std::clamp((float)values[i++], 0.05f, 1.0f);
     if (i != kProfileValueCount) return 0;
     ApplyEditState(state);
 #ifdef __EMSCRIPTEN__
@@ -753,13 +777,15 @@ EM_JS(void, js_request_export, (int imageId, int revision, int fmt, int fullRes,
                                 double ca, double distortion, double shadows, double highlights,
                                 double cy0, double cy1, double cy2, double cy3, double cy4,
                                 double cropLeft, double cropTop, double cropRight, double cropBottom,
-                                int rotate, double quality), {
+                                int rotate, double quality,
+                                double blurAmount, double blurFocusX, double blurFocusY,
+                                double blurRange), {
     if (!window._wasmraw || !window._wasmraw.requestExport) return;
     window._wasmraw.requestExport(imageId, revision, fmt, fullRes, exp, black, white,
         contrast, sat, temperature, tint, wbR, wbG, wbB, vignette, clarity, clarityRadius,
         sharpening, sharpenRadius, denoise, vibrance, ca, distortion, shadows, highlights,
         cy0, cy1, cy2, cy3, cy4, cropLeft, cropTop, cropRight, cropBottom, rotate,
-        Math.floor(quality));
+        Math.floor(quality), blurAmount, blurFocusX, blurFocusY, blurRange);
 });
 
 EM_JS(void, js_select_image, (int imageId), {
@@ -803,7 +829,9 @@ static void RequestExport(int format)
                       (double)g_dec->highlights / 100.0,
                       g_dec->curveY[0], g_dec->curveY[1], g_dec->curveY[2], g_dec->curveY[3], g_dec->curveY[4],
                       g_dec->cropLeft, g_dec->cropTop, g_dec->cropRight, g_dec->cropBottom,
-                      g_dec->rotate, g_dec->jpegQuality);
+                      g_dec->rotate, g_dec->jpegQuality,
+                      (double)g_dec->blurAmount / 100.0,
+                      g_dec->blurFocusX, g_dec->blurFocusY, g_dec->blurRange);
 #else
     (void)format;
 #endif
@@ -1281,6 +1309,7 @@ static void DrawToolbox()
         g_previewDirty = true;
     }
     ImGui::Checkbox("Pick from preview (click image)", &g_wbPicking);
+    if (g_wbPicking && g_dofPicking) g_dofPicking = false;
     if (!g_dec->loaded) ImGui::TextDisabled("Load a RAW first");
 
     ImGui::Separator();
@@ -1304,6 +1333,26 @@ static void DrawToolbox()
         g_previewDirty = true;
     }
     ImGui::TextDisabled("Live CPU point ops on decoded preview");
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Depth of field");
+    SliderIntWithReset("Blur strength", &g_dec->blurAmount, 0, 100, "%d", 0);
+    int falloff = (int)std::lround(g_dec->blurRange * 100.0f);
+    if (ImGui::SliderInt("Falloff", &falloff, 5, 100, "%d")) {
+        g_dec->blurRange = (float)falloff / 100.0f;
+        g_previewDirty = true;
+    }
+    if (ImGui::Checkbox("Pick focus (click image)", &g_dofPicking) && g_dofPicking)
+        g_wbPicking = false;
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Center focus")) {
+        g_dec->blurFocusX = 0.5f;
+        g_dec->blurFocusY = 0.5f;
+        g_previewDirty = true;
+    }
+    if (g_dec->blurAmount > 0)
+        ImGui::TextDisabled("Focus at %.2f, %.2f", g_dec->blurFocusX, g_dec->blurFocusY);
+    ImGui::TextDisabled("Distance from the focus point drives the blur");
 
     bool hasImage = g_dec->loaded && g_dec->pw > 0;
     ImGui::Separator();
@@ -1443,6 +1492,17 @@ static void DrawPreview()
         }
     }
 
+    // Depth-of-field focus picking: the focus is stored in output-normalized
+    // coordinates, which is exactly the space the falloff is evaluated in.
+    if (g_dofPicking && hovered && ImGui::IsMouseClicked(0) && g_dec->loaded) {
+        float u = (mouse.x - tlx) / iw, v = (mouse.y - tly) / ih;
+        if (u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f) {
+            g_dec->blurFocusX = std::clamp(u, 0.0f, 1.0f);
+            g_dec->blurFocusY = std::clamp(v, 0.0f, 1.0f);
+            g_previewDirty = true;
+        }
+    }
+
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), IM_COL32(20, 20, 24, 255));
     const bool split = g_beforeAfter && g_dec->beforeTexture != 0 &&
@@ -1461,6 +1521,12 @@ static void DrawPreview()
         dl->AddText(ImVec2(midX + 8, origin.y + 6), IM_COL32(255, 255, 255, 220), "After");
     } else {
         dl->AddImage((ImTextureID)(intptr_t)g_tex, ImVec2(tlx, tly), ImVec2(tlx + iw, tly + ih));
+    }
+    if (g_dec->loaded && g_dec->blurAmount > 0) {
+        const float fx = tlx + g_dec->blurFocusX * iw;
+        const float fy = tly + g_dec->blurFocusY * ih;
+        dl->AddCircle(ImVec2(fx, fy), 7.0f, IM_COL32(255, 255, 255, 210), 0, 1.0f);
+        dl->AddCircleFilled(ImVec2(fx, fy), 2.5f, IM_COL32(255, 220, 80, 240));
     }
 
     char zbuf[48];

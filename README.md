@@ -24,6 +24,7 @@ no server, no uploads, no account. Drop a RAW file in the browser and edit it.
   - Chromatic aberration and distortion correction
    - Vignetting correction (+ lighten / - darken)
    - Crop (normalized rectangle) and 90-degree rotation steps
+   - Depth of field: blur strength, falloff, and click-to-pick focus point
    - Histogram window (luma + RGB)
   - Navigator overview, pixel readout, preview pan / zoom
 - **History**: per-image undo/redo and named snapshots, with keyboard shortcuts.
@@ -107,6 +108,8 @@ smoke/              Headless smoke test (synthetic DNG etc.)
   camera-space re-demosaic.
 - Detail, color, and lens tools are practical CPU approximations; the full
   `rtengine` color pipeline and profile compatibility are deferred.
+- Depth of field is a focus-driven falloff over a reduced blur pyramid, not a
+  depth map: distance from the focus point stands in for subject distance.
 - Masks, batch processing, preferences, and project persistence are not
   implemented yet.
 - Full-res export with local-contrast tools is slower but stays off the UI thread.

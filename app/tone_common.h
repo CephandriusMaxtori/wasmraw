@@ -38,6 +38,10 @@ struct Params {
     float cropRight = 1.f;
     float cropBottom = 1.f;
     int rotate = 0;
+    float blurAmount = 0.f;
+    float blurFocusX = 0.5f;
+    float blurFocusY = 0.5f;
+    float blurRange = 0.35f;
 };
 
 static inline void GetCropBounds(int w, int h, const Params& p,
@@ -87,6 +91,140 @@ static inline float EvalCurve(const float* y, float x)
     return y[n - 1];
 }
 
+// Depth of field: two box-blurred levels (half and quarter resolution) are
+// blended against the sharp image by distance from the focus point. Working on
+// a reduced pyramid keeps the cost linear and small enough for live preview.
+static inline void BoxBlurRgb(std::vector<float>& buffer, int w, int h, int radius)
+{
+    if (radius < 1 || w < 1 || h < 1) return;
+    const size_t count = (size_t)w * h * 3;
+    std::vector<float> temp(count);
+    const float inverse = 1.0f / (float)(2 * radius + 1);
+    for (int y = 0; y < h; ++y) {
+        const size_t row = (size_t)y * w * 3;
+        for (int c = 0; c < 3; ++c) {
+            float sum = 0.f;
+            for (int k = -radius; k <= radius; ++k)
+                sum += buffer[row + (size_t)std::clamp(k, 0, w - 1) * 3 + c];
+            for (int x = 0; x < w; ++x) {
+                temp[row + (size_t)x * 3 + c] = sum * inverse;
+                const int add = std::min(x + radius + 1, w - 1);
+                const int sub = std::max(x - radius, 0);
+                sum += buffer[row + (size_t)add * 3 + c] - buffer[row + (size_t)sub * 3 + c];
+            }
+        }
+    }
+    for (int x = 0; x < w; ++x) {
+        for (int c = 0; c < 3; ++c) {
+            float sum = 0.f;
+            for (int k = -radius; k <= radius; ++k)
+                sum += temp[(size_t)std::clamp(k, 0, h - 1) * w * 3 + (size_t)x * 3 + c];
+            for (int y = 0; y < h; ++y) {
+                buffer[(size_t)y * w * 3 + (size_t)x * 3 + c] = sum * inverse;
+                const int add = std::min(y + radius + 1, h - 1);
+                const int sub = std::max(y - radius, 0);
+                sum += temp[(size_t)add * w * 3 + (size_t)x * 3 + c] -
+                       temp[(size_t)sub * w * 3 + (size_t)x * 3 + c];
+            }
+        }
+    }
+}
+
+static inline void DownsampleRgb(const std::vector<float>& src, int w, int h,
+                                 std::vector<float>& dst, int& dw, int& dh)
+{
+    dw = std::max(1, w / 2);
+    dh = std::max(1, h / 2);
+    dst.assign((size_t)dw * dh * 3, 0.f);
+    for (int y = 0; y < dh; ++y) {
+        for (int x = 0; x < dw; ++x) {
+            float sum[3] = { 0.f, 0.f, 0.f };
+            for (int dy = 0; dy < 2; ++dy) {
+                for (int dx = 0; dx < 2; ++dx) {
+                    const int sx = std::min(x * 2 + dx, w - 1);
+                    const int sy = std::min(y * 2 + dy, h - 1);
+                    const size_t index = ((size_t)sy * w + sx) * 3;
+                    for (int c = 0; c < 3; ++c) sum[c] += src[index + c];
+                }
+            }
+            const size_t index = ((size_t)y * dw + x) * 3;
+            for (int c = 0; c < 3; ++c) dst[index + c] = sum[c] * 0.25f;
+        }
+    }
+}
+
+static inline void SampleBilinearRgb(const std::vector<float>& buffer, int w, int h,
+                                      float x, float y, float* out)
+{
+    x = std::clamp(x, 0.f, (float)(w - 1));
+    y = std::clamp(y, 0.f, (float)(h - 1));
+    const int x0 = (int)x, y0 = (int)y;
+    const int x1 = std::min(x0 + 1, w - 1), y1 = std::min(y0 + 1, h - 1);
+    const float fx = x - (float)x0, fy = y - (float)y0;
+    for (int c = 0; c < 3; ++c) {
+        const float a = buffer[((size_t)y0 * w + x0) * 3 + c];
+        const float b = buffer[((size_t)y0 * w + x1) * 3 + c];
+        const float d = buffer[((size_t)y1 * w + x0) * 3 + c];
+        const float e = buffer[((size_t)y1 * w + x1) * 3 + c];
+        out[c] = a + (b - a) * fx + (d - a) * fy + (a - b - d + e) * fx * fy;
+    }
+}
+
+static inline float BlurFalloff(int ox, int oy, int outW, int outH, const Params& p)
+{
+    const float u = ((float)ox + 0.5f) / (float)outW;
+    const float v = ((float)oy + 0.5f) / (float)outH;
+    const float dx = (u - std::clamp(p.blurFocusX, 0.f, 1.f)) * (float)outW;
+    const float dy = (v - std::clamp(p.blurFocusY, 0.f, 1.f)) * (float)outH;
+    const float diagonal = std::sqrt((float)outW * (float)outW + (float)outH * (float)outH);
+    float t = std::sqrt(dx * dx + dy * dy) / (std::max(0.02f, p.blurRange) * diagonal);
+    t = std::clamp(t, 0.f, 1.f);
+    return t * t * (3.f - 2.f * t);
+}
+
+static inline void CompositeDepthOfField(const std::vector<float>& work, int outW, int outH,
+                                         const Params& p, std::vector<unsigned char>& rgba8)
+{
+    const float amount = std::clamp(p.blurAmount, 0.f, 1.f);
+    std::vector<float> level1, level2;
+    int hw, hh, qw, qh;
+    DownsampleRgb(work, outW, outH, level1, hw, hh);
+    BoxBlurRgb(level1, hw, hh, std::max(1, (int)std::lround(amount * 0.010f * (float)std::max(hw, hh))));
+    DownsampleRgb(level1, hw, hh, level2, qw, qh);
+    BoxBlurRgb(level2, qw, qh, std::max(1, (int)std::lround(amount * 0.022f * (float)std::max(qw, qh))));
+
+    for (int oy = 0; oy < outH; ++oy) {
+        for (int ox = 0; ox < outW; ++ox) {
+            const size_t index = ((size_t)oy * outW + ox) * 3;
+            const float amount8 = BlurFalloff(ox, oy, outW, outH, p) * amount;
+            float values[3];
+            if (amount8 <= 0.f) {
+                for (int c = 0; c < 3; ++c) values[c] = work[index + c];
+            } else {
+                float near[3], far[3];
+                const float u = ((float)ox + 0.5f) * 0.5f - 0.5f;
+                const float v = ((float)oy + 0.5f) * 0.5f - 0.5f;
+                SampleBilinearRgb(level1, hw, hh, u, v, near);
+                if (amount8 < 0.5f) {
+                    const float mixAmount = amount8 * 2.f;
+                    for (int c = 0; c < 3; ++c)
+                        values[c] = work[index + c] + (near[c] - work[index + c]) * mixAmount;
+                } else {
+                    SampleBilinearRgb(level2, qw, qh, u * 0.5f, v * 0.5f, far);
+                    const float mixAmount = (amount8 - 0.5f) * 2.f;
+                    for (int c = 0; c < 3; ++c)
+                        values[c] = near[c] + (far[c] - near[c]) * mixAmount;
+                }
+            }
+            const size_t output = ((size_t)oy * outW + ox) * 4;
+            rgba8[output + 0] = (unsigned char)(SrgbEncode(values[0]) * 255.0f + 0.5f);
+            rgba8[output + 1] = (unsigned char)(SrgbEncode(values[1]) * 255.0f + 0.5f);
+            rgba8[output + 2] = (unsigned char)(SrgbEncode(values[2]) * 255.0f + 0.5f);
+            rgba8[output + 3] = 255;
+        }
+    }
+}
+
 static inline void ToneMapToBuffer(const std::vector<float>& src, int w, int h,
                                    const Params& p, std::vector<unsigned char>& rgba8)
 {
@@ -114,6 +252,9 @@ static inline void ToneMapToBuffer(const std::vector<float>& src, int w, int h,
     const int normalizedRotation = ((p.rotate % 360) + 360) % 360;
     const int cropW = right - left;
     const int cropH = bottom - top;
+    const bool blurActive = p.blurAmount > 0.001f;
+    std::vector<float> work;
+    if (blurActive) work.resize((size_t)outW * outH * 3);
 
     std::vector<float> blurY;
     if (needsLuma && maxDim > 0.f) {
@@ -244,12 +385,20 @@ static inline void ToneMapToBuffer(const std::vector<float>& src, int w, int h,
             }
 
             const size_t outputIndex = (size_t)oy * outW + ox;
-            destination[outputIndex * 4 + 0] = (unsigned char)(SrgbEncode(values[0]) * 255.0f + 0.5f);
-            destination[outputIndex * 4 + 1] = (unsigned char)(SrgbEncode(values[1]) * 255.0f + 0.5f);
-            destination[outputIndex * 4 + 2] = (unsigned char)(SrgbEncode(values[2]) * 255.0f + 0.5f);
-            destination[outputIndex * 4 + 3] = 255;
+            if (blurActive) {
+                work[outputIndex * 3 + 0] = values[0];
+                work[outputIndex * 3 + 1] = values[1];
+                work[outputIndex * 3 + 2] = values[2];
+            } else {
+                destination[outputIndex * 4 + 0] = (unsigned char)(SrgbEncode(values[0]) * 255.0f + 0.5f);
+                destination[outputIndex * 4 + 1] = (unsigned char)(SrgbEncode(values[1]) * 255.0f + 0.5f);
+                destination[outputIndex * 4 + 2] = (unsigned char)(SrgbEncode(values[2]) * 255.0f + 0.5f);
+                destination[outputIndex * 4 + 3] = 255;
+            }
         }
     }
+
+    if (blurActive) CompositeDepthOfField(work, outW, outH, p, rgba8);
 }
 
 }

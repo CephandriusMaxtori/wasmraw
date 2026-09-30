@@ -86,3 +86,12 @@ if(EMSCRIPTEN)
         "SHELL:-O2"
     )
 endif()
+
+# The page favicon lives next to the generated shell so the icon resolves both
+# from the build directory and from the deployed Pages site.
+add_custom_command(TARGET wasmraw POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/logo.svg"
+            "$<TARGET_FILE_DIR:wasmraw>/logo.svg"
+    VERBATIM
+)

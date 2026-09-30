@@ -355,7 +355,8 @@ int dec_render_preview(double exposure, double black, double white, double contr
                        double ca, double distortion, double shadows, double highlights,
                        double cy0, double cy1, double cy2, double cy3, double cy4,
                        double cropLeft, double cropTop, double cropRight, double cropBottom,
-                       int rotate, int quality)
+                       int rotate, int quality,
+                       double blurAmount, double blurFocusX, double blurFocusY, double blurRange)
 {
     g_renderedPreview.clear();
     if (!g_dec.loaded || g_dec.previewRgb.empty()) return 0;
@@ -391,6 +392,10 @@ int dec_render_preview(double exposure, double black, double white, double contr
     p.cropRight = (float)cropRight;
     p.cropBottom = (float)cropBottom;
     p.rotate = rotate;
+    p.blurAmount = (float)blurAmount;
+    p.blurFocusX = (float)blurFocusX;
+    p.blurFocusY = (float)blurFocusY;
+    p.blurRange = (float)blurRange;
     try {
         tone::ToneMapToBuffer(g_dec.previewRgb, g_dec.pw, g_dec.ph, p, g_renderedPreview);
     } catch (const std::bad_alloc&) {
@@ -431,7 +436,8 @@ int dec_export_write(double exposure, double black, double white, double contras
                      double ca, double distortion, double shadows, double highlights,
                      double cy0, double cy1, double cy2, double cy3, double cy4,
                      double cropLeft, double cropTop, double cropRight, double cropBottom,
-                     int rotate, int fullRes, int format, int quality)
+                     int rotate, int fullRes, int format, int quality,
+                     double blurAmount, double blurFocusX, double blurFocusY, double blurRange)
 {
     g_exportBuf.clear();
     if (!g_dec.loaded) {
@@ -500,6 +506,10 @@ int dec_export_write(double exposure, double black, double white, double contras
     p.cropRight = (float)cropRight;
     p.cropBottom = (float)cropBottom;
     p.rotate = rotate;
+    p.blurAmount = (float)blurAmount;
+    p.blurFocusX = (float)blurFocusX;
+    p.blurFocusY = (float)blurFocusY;
+    p.blurRange = (float)blurRange;
     tone::GetOutputSize(outputWidth, outputHeight, p, outputWidth, outputHeight);
 
     std::vector<unsigned char> rgba8;

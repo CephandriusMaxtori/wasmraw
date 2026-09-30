@@ -134,7 +134,9 @@ function handleProcess(request) {
     request.distortion, request.shadows, request.highlights,
     request.cy0, request.cy1, request.cy2, request.cy3, request.cy4,
     request.cropLeft, request.cropTop, request.cropRight, request.cropBottom,
-    request.rotate || 0, quality);
+    request.rotate || 0, quality,
+    request.blurAmount || 0, request.blurFocusX || 0.5, request.blurFocusY || 0.5,
+    request.blurRange || 0.35);
   var size = Module._dec_rendered_preview_size();
   if (!result || !size) {
     var errorFields = responseFields(request);
@@ -163,7 +165,9 @@ function handleExport(request) {
     request.distortion, request.shadows, request.highlights,
     request.cy0, request.cy1, request.cy2, request.cy3, request.cy4,
     request.cropLeft, request.cropTop, request.cropRight, request.cropBottom,
-    request.rotate || 0, request.fullRes ? 1 : 0, request.fmt, request.quality);
+    request.rotate || 0, request.fullRes ? 1 : 0, request.fmt, request.quality,
+    request.blurAmount || 0, request.blurFocusX || 0.5, request.blurFocusY || 0.5,
+    request.blurRange || 0.35);
   var size = Module._dec_export_size();
   if (!result || !size) {
     fields.type = 'export-error';
