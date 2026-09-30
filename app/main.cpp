@@ -1916,8 +1916,10 @@ static void DrawMainMenuBar()
         ImGui::EndMenu();
     }
 
-    ImGui::EndMainMenuBar();
+    // PopFont must happen while the window is still open: ImGui verifies the
+    // font stack inside End(), so popping after EndMainMenuBar() is an error.
     if (g_menuFont) ImGui::PopFont();
+    ImGui::EndMainMenuBar();
 }
 
 static void RenderFrame(GLFWwindow* window)
