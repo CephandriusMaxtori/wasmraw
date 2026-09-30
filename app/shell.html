@@ -557,6 +557,13 @@
 
         function openFileDialog() { inputElement.click(); }
 
+      // Matches the build id stamped into the page by the build, so the worker
+      // and its decoder module are refetched whenever the UI module changes.
+      function buildId() {
+        var meta = document.querySelector('meta[name=build]');
+        return meta ? meta.content : 'dev';
+      }
+
         window._wasmraw = {
           get ready() { return runtimeReady; },
           decode: function (bytes, name) { return loadBytes(bytes, name); },
@@ -632,6 +639,7 @@
       var Module = {
         print: function () { console.log.apply(console, arguments); },
         printErr: function () { console.error.apply(console, arguments); },
+        locateFile: function (path) { return path + '?build=' + encodeURIComponent(buildId()); },
         canvas: canvasElement,
         setStatus: function (text) { if (text) setStatus(text); },
         onAbort: function (text) { setStatus('Runtime aborted: ' + text, 'err'); },
@@ -642,7 +650,7 @@
           setStatus('Ready - drop RAW files, double-click, or press Ctrl+O');
           try {
             if (typeof Worker === 'undefined') throw new Error('Worker API unavailable');
-            decodeWorker = new Worker('decoder-worker.js');
+            decodeWorker = new Worker('decoder-worker.js?build=' + encodeURIComponent(buildId()));
             decodeWorker.onmessage = onWorkerMessage;
             decodeWorker.onerror = function (event) {
               decoderReady = false;

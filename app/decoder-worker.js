@@ -1,11 +1,16 @@
-self.importScripts('decoder.js');
+// The build id is passed in on the worker URL. Without it the browser can serve
+// a stale decoder.js/decoder.wasm pair that no longer matches the UI module.
+var buildMatch = /[?&]build=([^&]+)/.exec(self.location.search || '');
+var buildId = buildMatch ? decodeURIComponent(buildMatch[1]) : 'dev';
+
+self.importScripts('decoder.js?build=' + buildId);
 
 var base = new URL('.', self.location.href).href;
 var Module = null;
 var decodeBusy = false;
 
 createDecoder({
-  locateFile: function (path) { return base + path; },
+  locateFile: function (path) { return base + path + '?build=' + buildId; },
   print: function (text) { console.log('[decoder]', text); },
   printErr: function (text) {
     console.error('[decoder]', text);

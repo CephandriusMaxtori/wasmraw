@@ -88,10 +88,33 @@ if(EMSCRIPTEN)
 endif()
 
 # The page favicon lives next to the generated shell so the icon resolves both
-# from the build directory and from the deployed Pages site.
+# from the build directory and from the deployed Pages site. The build id is
+# stamped into the generated HTML so browsers refetch the module after a deploy
+# instead of reusing the previous one from the HTTP cache.
+set(WASMRAW_BUILD_ID "dev")
+find_package(Git QUIET)
+if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE WASMRAW_GIT_SHA
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(WASMRAW_GIT_SHA)
+        set(WASMRAW_BUILD_ID "${WASMRAW_GIT_SHA}")
+    endif()
+endif()
+message(STATUS "WasmRaw build id: ${WASMRAW_BUILD_ID}")
+
 add_custom_command(TARGET wasmraw POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+            -DINPUT=$<TARGET_FILE_DIR:wasmraw>/wasmraw.html
+            -DBUILD_ID=${WASMRAW_BUILD_ID}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/stamp_build.cmake"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/logo.svg"
             "$<TARGET_FILE_DIR:wasmraw>/logo.svg"
+    COMMENT "Stamping build id and copying logo"
     VERBATIM
 )
