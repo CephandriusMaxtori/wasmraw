@@ -7,11 +7,27 @@ var decodeBusy = false;
 createDecoder({
   locateFile: function (path) { return base + path; },
   print: function (text) { console.log('[decoder]', text); },
-  printErr: function (text) { console.error('[decoder]', text); }
+  printErr: function (text) {
+    console.error('[decoder]', text);
+    if (typeof text === 'string' && text.indexOf('Aborted') === 0) {
+      decodeFailed('The decoder ran out of memory and stopped. Try a smaller RAW file.');
+    }
+  },
+  onAbort: function (what) {
+    decodeFailed('The decoder ran out of memory and stopped' + (what ? ' (' + what + ')' : '') + '. Try a smaller RAW file.');
+  }
 }).then(function (module) {
   Module = module;
   self.postMessage({ type: 'ready' });
 });
+
+// A module-level abort (almost always WASM memory exhaustion on low-memory
+// devices) used to leave the worker dead with no feedback and every later
+// request silently hanging. Report it and re-arm the queue instead.
+function decodeFailed(msg) {
+  decodeBusy = false;
+  self.postMessage({ type: 'fatal', msg: msg });
+}
 
 function responseFields(request) {
   return {
@@ -85,6 +101,7 @@ function handleDecode(request) {
     fields.preview = preview;
     fields.w = Module._dec_w();
     fields.h = Module._dec_h();
+    fields.hasFullRes = Module._dec_has_fullres();
     fields.pw = pw;
     fields.ph = ph;
     fields.iso = Module._dec_iso();

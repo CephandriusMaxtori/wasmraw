@@ -33,6 +33,7 @@ extern "C" int dec_export_write(double exposure, double black, double white,
                                  int rotate, int fullRes, int format, int quality);
 extern "C" size_t dec_export_size();
 extern "C" const unsigned char* dec_export_data();
+extern "C" int dec_has_fullres();
 
 static const char* kPngMagic = "\x89PNG\r\n\x1a\n";
 
@@ -158,7 +159,22 @@ int main(int argc, char** argv)
         printf("EXPORT-JPG ok=%d size=%u magic=%d\n", okJpg, (unsigned)jpgSz,
                jpgOk ? 1 : 0);
 
-        if (!pngOk || !jpgOk) r = 1;
+        const int fullResAvail = dec_has_fullres();
+        int okNative = dec_export_write(0.0, 0.0, 1.0, 0.0, 1.0,
+                                        0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
+                                        0.0, 2.0, 0.0, 1.0, 0.0, 0.0,
+                                        0.0, 0.0, 0.0, 0.0,
+                                              0.0, 0.25, 0.5, 0.75, 1.0,
+                                              0.0, 0.0, 1.0, 1.0, 0, 1, 0, 0);
+        size_t nativeSz = dec_export_size();
+        const unsigned char* native = dec_export_data();
+        bool nativeOk = fullResAvail
+            ? (okNative && nativeSz > 0 && native && memcmp(native, kPngMagic, 8) == 0)
+            : (okNative == 0 && nativeSz == 0);
+        printf("EXPORT-NATIVE ok=%d available=%d size=%u magic=%d\n", okNative,
+               fullResAvail, (unsigned)nativeSz, nativeOk ? 1 : 0);
+
+        if (!pngOk || !jpgOk || !nativeOk) r = 1;
     }
     return r ? 1 : 0;
 }

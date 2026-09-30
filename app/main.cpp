@@ -70,6 +70,15 @@ struct ImageDocument : EditState {
     std::vector<unsigned char> rendered;
     int renderedWidth = 0;
     int renderedHeight = 0;
+    std::vector<unsigned char> before;
+    GLuint beforeTexture = 0;
+    int beforeWidth = 0;
+    int beforeHeight = 0;
+    float beforeCropLeft = -1.0f;
+    float beforeCropTop = -1.0f;
+    float beforeCropRight = -1.0f;
+    float beforeCropBottom = -1.0f;
+    int beforeRotate = -1;
     std::vector<unsigned char> thumbnail;
     GLuint thumbnailTexture = 0;
     int thumbnailWidth = 0;
@@ -96,6 +105,7 @@ static bool g_wbPicking = false;
 static bool g_skipHistory = false;
 static bool g_controlHovered = false;
 static bool g_controlChanged = false;
+static bool g_beforeAfter = false;
 static int g_requestedImageId = 0;
 
 static ImageDocument* FindDocument(int id)
@@ -128,6 +138,8 @@ static bool EditStateEqual(const EditState& a, const EditState& b)
 static void RequestPreview();
 static void ToneMapPreview();
 static void MarkToneDirty();
+static void BuildBeforePreview(ImageDocument* doc);
+static bool BeforeNeedsRebuild(const ImageDocument* doc);
 
 static const char* kWbPresets[] = { "Camera", "Daylight", "Cloudy", "Shade",
                                     "Tungsten", "Fluorescent", "Flash", "Custom" };
@@ -352,7 +364,49 @@ static void ToneMapPreview()
         g_dec->rendered = g_rgba;
         g_dec->renderedQuality = 0;
         g_dec->renderedRevision = g_dec->revision;
+        if (g_beforeAfter && BeforeNeedsRebuild(g_dec)) BuildBeforePreview(g_dec);
     }
+}
+
+static void BuildBeforePreview(ImageDocument* doc)
+{
+    if (!doc || !doc->loaded || doc->pw <= 0 || doc->ph <= 0) return;
+    tone::Params params;
+    params.cropLeft = doc->cropLeft;
+    params.cropTop = doc->cropTop;
+    params.cropRight = doc->cropRight;
+    params.cropBottom = doc->cropBottom;
+    params.rotate = doc->rotate;
+    std::vector<unsigned char> pixels;
+    tone::ToneMapToBuffer(doc->rgb, doc->pw, doc->ph, params, pixels);
+    int width, height;
+    tone::GetOutputSize(doc->pw, doc->ph, params, width, height);
+    if (doc->beforeTexture) glDeleteTextures(1, &doc->beforeTexture);
+    glGenTextures(1, &doc->beforeTexture);
+    glBindTexture(GL_TEXTURE_2D, doc->beforeTexture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    doc->before = std::move(pixels);
+    doc->beforeWidth = width;
+    doc->beforeHeight = height;
+    doc->beforeCropLeft = doc->cropLeft;
+    doc->beforeCropTop = doc->cropTop;
+    doc->beforeCropRight = doc->cropRight;
+    doc->beforeCropBottom = doc->cropBottom;
+    doc->beforeRotate = doc->rotate;
+}
+
+// The unedited reference only depends on geometry, so it must not be rebuilt on
+// every slider tick. That is pure waste and shows up as frame stalls.
+static bool BeforeNeedsRebuild(const ImageDocument* doc)
+{
+    return doc->beforeTexture == 0 || doc->beforeWidth != doc->renderedWidth ||
+           doc->beforeHeight != doc->renderedHeight || doc->beforeRotate != doc->rotate ||
+           doc->beforeCropLeft != doc->cropLeft || doc->beforeCropTop != doc->cropTop ||
+           doc->beforeCropRight != doc->cropRight || doc->beforeCropBottom != doc->cropBottom;
 }
 
 static void MapOutputToSource(int outputX, int outputY, int& sourceX, int& sourceY)
@@ -490,7 +544,10 @@ void wasm_select_image(int imageId)
     ImageDocument* doc = FindDocument(imageId);
     if (doc) {
         ActivateDocument(doc);
-        if (doc->loaded) RequestPreview();
+        if (doc->loaded) {
+            if (g_beforeAfter) BuildBeforePreview(doc);
+            RequestPreview();
+        }
     }
 }
 
@@ -508,7 +565,7 @@ EMSCRIPTEN_KEEPALIVE
 void wasm_accept_decode(int imageId, const float* preview, int w, int h, int pw, int ph,
                         double iso, double shutter, double aperture, double focal,
                         const char* make, const char* model, const char* lens,
-                        const char* status)
+                        const char* status, int hasFullRes)
 {
     ImageDocument* doc = FindDocument(imageId);
     if (!doc) {
@@ -530,7 +587,8 @@ void wasm_accept_decode(int imageId, const float* preview, int w, int h, int pw,
     doc->pw = pw; doc->ph = ph;
     doc->colors = 3;
     doc->bits = 16;
-    doc->hasFullRes = true;
+    doc->hasFullRes = hasFullRes != 0;
+    if (!doc->hasFullRes) doc->exportFullRes = false;
     doc->fw = w; doc->fh = h;
     doc->iso = (float)iso;
     doc->shutter = (float)shutter;
@@ -574,6 +632,7 @@ void wasm_accept_preview(int imageId, const unsigned char* rgba, int w, int h,
         g_texH = 0;
         g_previewDirty = true;
         g_histDirty = true;
+        if (g_beforeAfter && BeforeNeedsRebuild(doc)) BuildBeforePreview(doc);
     }
 }
 
@@ -1259,6 +1318,9 @@ static void DrawToolbox()
         else
             ImGui::TextDisabled("Preview %dx%d -> tone-mapped copy",
                                 g_dec->pw, g_dec->ph);
+    } else {
+        ImGui::TextDisabled("Native %dx%d too large for browser memory; preview export only",
+                            g_dec->fw, g_dec->fh);
     }
     if (ImGui::Button("Export PNG")) RequestExport(0);
     ImGui::SameLine();
@@ -1286,6 +1348,9 @@ static void DrawPreview()
     if (ImGui::Button("-")) { g_zoomFit = false; g_zoom = std::max(0.05f, g_zoom / 1.25f); }
     ImGui::SameLine();
     if (ImGui::Button("+")) { g_zoomFit = false; g_zoom = std::min(16.0f, g_zoom * 1.25f); }
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Before/After", &g_beforeAfter) && g_beforeAfter)
+        BuildBeforePreview(g_dec);
     ImGui::SameLine();
     ImGui::TextDisabled("%d x %d", g_texW, g_texH);
 
@@ -1380,7 +1445,23 @@ static void DrawPreview()
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), IM_COL32(20, 20, 24, 255));
-    dl->AddImage((ImTextureID)(intptr_t)g_tex, ImVec2(tlx, tly), ImVec2(tlx + iw, tly + ih));
+    const bool split = g_beforeAfter && g_dec->beforeTexture != 0 &&
+                       g_dec->beforeWidth == g_texW && g_dec->beforeHeight == g_texH;
+    if (split) {
+        const float midX = origin.x + avail.x * 0.5f;
+        dl->PushClipRect(origin, ImVec2(midX, origin.y + avail.y), true);
+        dl->AddImage((ImTextureID)(intptr_t)g_dec->beforeTexture,
+                     ImVec2(tlx, tly), ImVec2(tlx + iw, tly + ih));
+        dl->PopClipRect();
+        dl->PushClipRect(ImVec2(midX, origin.y), ImVec2(origin.x + avail.x, origin.y + avail.y), true);
+        dl->AddImage((ImTextureID)(intptr_t)g_tex, ImVec2(tlx, tly), ImVec2(tlx + iw, tly + ih));
+        dl->PopClipRect();
+        dl->AddLine(ImVec2(midX, origin.y), ImVec2(midX, origin.y + avail.y), IM_COL32(240, 240, 240, 200), 1.0f);
+        dl->AddText(ImVec2(origin.x + 8, origin.y + 6), IM_COL32(255, 255, 255, 220), "Before");
+        dl->AddText(ImVec2(midX + 8, origin.y + 6), IM_COL32(255, 255, 255, 220), "After");
+    } else {
+        dl->AddImage((ImTextureID)(intptr_t)g_tex, ImVec2(tlx, tly), ImVec2(tlx + iw, tly + ih));
+    }
 
     char zbuf[48];
     snprintf(zbuf, sizeof(zbuf), "%d%%%s", (int)(viewScale * 100.0f),

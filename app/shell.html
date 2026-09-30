@@ -342,7 +342,8 @@
             try {
               Module._wasm_accept_decode(message.imageId, ptr, message.w, message.h,
                 message.pw, message.ph, message.iso, message.shutter,
-                message.aperture, message.focal, makePtr, modelPtr, lensPtr, statusPtr);
+                message.aperture, message.focal, makePtr, modelPtr, lensPtr, statusPtr,
+                message.hasFullRes === undefined ? 1 : message.hasFullRes);
             } finally {
               Module._free(makePtr);
               Module._free(modelPtr);
@@ -412,6 +413,13 @@
             decodeBusy = false;
             updateRecordStatus(message.imageId || 0, message.msg || 'Decoder error');
             if (message.imageId === activeImageId) setStatus(message.msg || 'Decoder error', 'err');
+            pumpDecodeQueue();
+            break;
+          }
+          case 'fatal': {
+            decodeBusy = false;
+            if (activeImageId) updateRecordStatus(activeImageId, message.msg || 'Decoder stopped');
+            setStatus(message.msg || 'The decoder stopped after running out of memory.', 'err');
             pumpDecodeQueue();
             break;
           }

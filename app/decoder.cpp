@@ -9,17 +9,24 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <vector>
 #include <emscripten.h>
 
 static const int kPreviewMaxDim = 1600;
 
+// Retaining a linear float copy of the native image costs 12 bytes per pixel on
+// top of everything LibRaw already holds. Past this pixel count the browser
+// cannot afford it, so we keep preview-only and say so instead of dying.
+static const long long kFullResPixelBudget = 24000000LL;
+
 struct Decoded {
     bool loaded = false;
     int w = 0, h = 0, colors = 0, bits = 0;
     int pw = 0, ph = 0;
-    std::vector<float> previewRgb;  // pw*ph*3 linear, transferred to the UI
-    std::vector<float> fullRgb;     // w*h*3 linear, kept here for export
+    std::vector<float> previewRgb;           // pw*ph*3 linear, transferred to the UI
+    std::vector<unsigned short> fullRgb;     // w*h*3 16-bit linear, kept for export
+    bool hasFullRes = false;
     char make[64] = {0};
     char model[64] = {0};
     char lens[80] = {0};
@@ -43,6 +50,20 @@ static void CloseLoadSession()
 {
     if (g_phaseImg) { libraw_dcraw_clear_mem(g_phaseImg); g_phaseImg = nullptr; }
     if (g_lr) { libraw_close(g_lr); g_lr = nullptr; }
+}
+
+// Browser memory is finite and a Chromebook can have very little headroom. An
+// escaping allocation failure used to abort the whole module (Emscripten
+// "Aborted"), which left the worker dead with no usable error. Convert the
+// failure into a normal decode error instead.
+static int FailStage(const char* stage, int code)
+{
+    snprintf(g_dec.status, sizeof(g_dec.status),
+             "Out of memory while %s (%dx%d) - file too large for browser memory",
+             stage, g_dec.w, g_dec.h);
+    CloseLoadSession();
+    g_dec.loaded = false;
+    return code;
 }
 
 static int PhaseOpen(const unsigned char* buf, int len)
@@ -82,7 +103,12 @@ static int PhaseOpen(const unsigned char* buf, int len)
 static int PhaseUnpack()
 {
     if (!g_lr) return -1003;
-    int err = libraw_unpack(g_lr);
+    int err = 0;
+    try {
+        err = libraw_unpack(g_lr);
+    } catch (const std::bad_alloc&) {
+        return FailStage("unpacking", -1005);
+    }
     if (err) {
         snprintf(g_dec.status, sizeof(g_dec.status), "Unpack failed (err %d)", err);
         CloseLoadSession();
@@ -95,14 +121,24 @@ static int PhaseUnpack()
 static int PhaseProcess()
 {
     if (!g_lr) return -1003;
-    int err = libraw_dcraw_process(g_lr);
+    int err = 0;
+    try {
+        err = libraw_dcraw_process(g_lr);
+    } catch (const std::bad_alloc&) {
+        return FailStage("processing", -1005);
+    }
     if (err) {
         snprintf(g_dec.status, sizeof(g_dec.status), "Process failed (err %d)", err);
         CloseLoadSession();
         return err;
     }
     int errc = 0;
-    g_phaseImg = libraw_dcraw_make_mem_image(g_lr, &errc);
+    g_phaseImg = nullptr;
+    try {
+        g_phaseImg = libraw_dcraw_make_mem_image(g_lr, &errc);
+    } catch (const std::bad_alloc&) {
+        return FailStage("building the processed image", -1005);
+    }
     if (!g_phaseImg) {
         snprintf(g_dec.status, sizeof(g_dec.status), "Mem image failed (err %d)", errc ? errc : -1002);
         CloseLoadSession();
@@ -124,9 +160,20 @@ static void BuildBuffersFromImage(const libraw_processed_image_t* img)
     const int pw = std::max(1, (int)(w * scale));
     const int ph = std::max(1, (int)(h * scale));
 
+    const bool keepFull = (long long)w * (long long)h <= kFullResPixelBudget;
+
     std::vector<float> out((size_t)pw * ph * 3, 0.f);
     std::vector<float> cnt((size_t)pw * ph, 0.f);
-    std::vector<float> full((size_t)w * h * 3, 0.f);  // native-res copy for export
+    std::vector<unsigned short> full;
+    if (keepFull) {
+        try {
+            full.resize((size_t)w * h * 3);
+        } catch (const std::bad_alloc&) {
+            full.clear();
+            full.shrink_to_fit();
+        }
+    }
+    const bool haveFull = keepFull && (full.size() == (size_t)w * h * 3);
 
     const unsigned char* data = img->data;
     const int cpl = colors > 4 ? 4 : colors;
@@ -153,7 +200,11 @@ static void BuildBuffersFromImage(const libraw_processed_image_t* img)
             } else {
                 r = v[0]; g = v[1]; b = v[2];
             }
-            full[idx] = r; full[idx + 1] = g; full[idx + 2] = b;
+            if (haveFull) {
+                full[idx] = (unsigned short)(r * 65535.0f + 0.5f);
+                full[idx + 1] = (unsigned short)(g * 65535.0f + 0.5f);
+                full[idx + 2] = (unsigned short)(b * 65535.0f + 0.5f);
+            }
             size_t pi = (size_t)py * pw + px;
             out[pi * 3 + 0] += r;
             out[pi * 3 + 1] += g;
@@ -177,6 +228,7 @@ static void BuildBuffersFromImage(const libraw_processed_image_t* img)
     g_dec.bits = bits;
     g_dec.previewRgb = std::move(out);
     g_dec.fullRgb = std::move(full);
+    g_dec.hasFullRes = haveFull;
 }
 
 static int PhaseFinish()
@@ -192,7 +244,11 @@ static int PhaseFinish()
         g_dec.aperture = g_lr->other.aperture;
         g_dec.focal = g_lr->other.focal_len;
         snprintf(g_dec.lens, sizeof(g_dec.lens), "%s", g_lr->other.desc);
-        BuildBuffersFromImage(g_phaseImg);
+        try {
+            BuildBuffersFromImage(g_phaseImg);
+        } catch (const std::bad_alloc&) {
+            return FailStage("building preview buffers", -1005);
+        }
         CloseLoadSession();
         g_dec.loaded = true;
 
@@ -213,9 +269,10 @@ static int PhaseFinish()
         if (g_dec.focal > 0.f)
             snprintf(cam + strlen(cam), sizeof(cam) - strlen(cam), "  %.0fmm", g_dec.focal);
         snprintf(g_dec.status, sizeof(g_dec.status),
-                 "%s %s - %dx%d (%d-bit, %dch) preview %dx%d%s%s",
+                 "%s %s - %dx%d (%d-bit, %dch) preview %dx%d%s%s%s",
                  g_dec.make, g_dec.model, g_dec.w, g_dec.h, g_dec.bits, g_dec.colors,
-                 g_dec.pw, g_dec.ph, cam[0] ? " | " : "", cam);
+                 g_dec.pw, g_dec.ph, cam[0] ? " | " : "", cam,
+                 g_dec.hasFullRes ? "" : " | native export off (file too large)");
         return 0;
     }
     snprintf(g_dec.status, sizeof(g_dec.status), "Decode failed before preview");
@@ -263,6 +320,9 @@ EMSCRIPTEN_KEEPALIVE
 int dec_h() { return g_dec.h; }
 
 EMSCRIPTEN_KEEPALIVE
+int dec_has_fullres() { return g_dec.hasFullRes ? 1 : 0; }
+
+EMSCRIPTEN_KEEPALIVE
 double dec_iso() { return g_dec.iso; }
 
 EMSCRIPTEN_KEEPALIVE
@@ -299,7 +359,6 @@ int dec_render_preview(double exposure, double black, double white, double contr
 {
     g_renderedPreview.clear();
     if (!g_dec.loaded || g_dec.previewRgb.empty()) return 0;
-
     tone::Params p;
     p.exposure = (float)exposure;
     p.black = (float)black;
@@ -332,7 +391,13 @@ int dec_render_preview(double exposure, double black, double white, double contr
     p.cropRight = (float)cropRight;
     p.cropBottom = (float)cropBottom;
     p.rotate = rotate;
-    tone::ToneMapToBuffer(g_dec.previewRgb, g_dec.pw, g_dec.ph, p, g_renderedPreview);
+    try {
+        tone::ToneMapToBuffer(g_dec.previewRgb, g_dec.pw, g_dec.ph, p, g_renderedPreview);
+    } catch (const std::bad_alloc&) {
+        g_renderedPreview.clear();
+        g_renderedPreview.shrink_to_fit();
+        return 0;
+    }
     tone::GetOutputSize(g_dec.pw, g_dec.ph, p, g_renderedWidth, g_renderedHeight);
     return 1;
 }
@@ -369,11 +434,36 @@ int dec_export_write(double exposure, double black, double white, double contras
                      int rotate, int fullRes, int format, int quality)
 {
     g_exportBuf.clear();
+    if (!g_dec.loaded) {
+        snprintf(g_exportStatus, sizeof(g_exportStatus), "Nothing loaded to export");
+        return 0;
+    }
+    if (fullRes != 0 && !g_dec.hasFullRes) {
+        snprintf(g_exportStatus, sizeof(g_exportStatus),
+                 "Native export unavailable: %dx%d exceeds the browser memory budget",
+                 g_dec.w, g_dec.h);
+        return 0;
+    }
     const bool useFullResolution = fullRes != 0;
-    const std::vector<float>& source = useFullResolution ? g_dec.fullRgb : g_dec.previewRgb;
+
+    std::vector<float> fullFloat;
+    const std::vector<float>* sourcePtr = &g_dec.previewRgb;
+    if (useFullResolution) {
+        try {
+            fullFloat.resize(g_dec.fullRgb.size());
+        } catch (const std::bad_alloc&) {
+            snprintf(g_exportStatus, sizeof(g_exportStatus),
+                     "Native export needs more memory than this browser has available");
+            return 0;
+        }
+        for (size_t i = 0; i < g_dec.fullRgb.size(); ++i)
+            fullFloat[i] = g_dec.fullRgb[i] / 65535.0f;
+        sourcePtr = &fullFloat;
+    }
+    const std::vector<float>& source = *sourcePtr;
     int outputWidth = useFullResolution ? g_dec.w : g_dec.pw;
     int outputHeight = useFullResolution ? g_dec.h : g_dec.ph;
-    if (!g_dec.loaded || source.empty() || outputWidth <= 0 || outputHeight <= 0) {
+    if (source.empty() || outputWidth <= 0 || outputHeight <= 0) {
         snprintf(g_exportStatus, sizeof(g_exportStatus), "Nothing loaded to export");
         return 0;
     }
@@ -413,7 +503,13 @@ int dec_export_write(double exposure, double black, double white, double contras
     tone::GetOutputSize(outputWidth, outputHeight, p, outputWidth, outputHeight);
 
     std::vector<unsigned char> rgba8;
-    tone::ToneMapToBuffer(source, outputWidth, outputHeight, p, rgba8);
+    try {
+        tone::ToneMapToBuffer(source, outputWidth, outputHeight, p, rgba8);
+    } catch (const std::bad_alloc&) {
+        snprintf(g_exportStatus, sizeof(g_exportStatus),
+                 "Export needs more memory than this browser has available");
+        return 0;
+    }
 
     struct Ctx { std::vector<unsigned char>* v; };
     auto writer = [](void* context, void* data, int size) {

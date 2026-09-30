@@ -110,4 +110,8 @@ smoke/              Headless smoke test (synthetic DNG etc.)
 - Masks, batch processing, preferences, and project persistence are not
   implemented yet.
 - Full-res export with local-contrast tools is slower but stays off the UI thread.
+- The worker keeps a 16-bit copy of the native image for export. Images above
+  24 MP drop that copy and export preview resolution only, so low-memory devices
+  get a working editor instead of a crashed tab. Allocation failures are reported
+  as decode errors rather than taking the module down.
 - No glib/GTK or full `rtengine` pipeline is linked into the WASM build.
